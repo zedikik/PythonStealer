@@ -396,12 +396,11 @@ def get_encryption_key(profile_path):
     # Поиск Local State в текущей и родительской папке
     local_state_path = Path(profile_path) / "Local State"
     if not local_state_path.exists():
-        # Ищем в родительской папке (User Data)
         parent_local_state = Path(profile_path).parent / "Local State"
         if parent_local_state.exists():
             local_state_path = parent_local_state
         else:
-            # Ищем в корне User Data
+            # Попробуем найти в корне User Data
             user_data_path = Path(profile_path).parent.parent / "Local State"
             if user_data_path.exists():
                 local_state_path = user_data_path
@@ -441,7 +440,7 @@ def get_encryption_key(profile_path):
         return None
 
 def decrypt_chromium_value(encrypted_value, key):
-    """Улучшенная расшифровка значений для Chromium"""
+    """Улучшенная расшифровка значений для Chromium с исправлением GCM"""
     try:
         # Если значение пустое, сразу возвращаем пустую строку
         if not encrypted_value:
@@ -463,44 +462,37 @@ def decrypt_chromium_value(encrypted_value, key):
             except:
                 pass
         
-        # Обработка AES-GCM (v10/v11)
-        if len(encrypted_value) > 3:
-            prefix = encrypted_value[:3]
-            if prefix in (b'v10', b'v11'):
-                try:
-                    nonce = encrypted_value[3:15]
-                    ciphertext = encrypted_value[15:-16]
-                    tag = encrypted_value[-16:]
-                    cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
-                    plaintext = cipher.decrypt_and_verify(ciphertext, tag)
-                    return plaintext.decode('utf-8')
-                except Exception as e:
-                    # Попробовать без тега
-                    try:
-                        nonce = encrypted_value[3:15]
-                        ciphertext = encrypted_value[15:]
-                        cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
-                        plaintext = cipher.decrypt(ciphertext)
-                        return plaintext.decode('utf-8')
-                    except:
-                        pass
+        # Обработка AES-GCM (v10/v11) - КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ
+        if len(encrypted_value) > 15 and encrypted_value.startswith(b'v10'):
+            try:
+                # Извлекаем nonce (12 байт после префикса v10)
+                nonce = encrypted_value[3:15]
+                ciphertext = encrypted_value[15:-16]  # Основной текст
+                tag = encrypted_value[-16:]  # Тег аутентификации
+                
+                cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+                plaintext = cipher.decrypt_and_verify(ciphertext, tag)
+                
+                # Декодируем результат
+                return plaintext.decode('utf-8')
+            except Exception as e:
+                print(f"Ошибка GCM дешифровки: {str(e)[:100]}")
+                pass
         
         # Обработка AES-CBC (старые версии)
-        if key and len(encrypted_value) > 15:
+        if key and len(encrypted_value) > 16:
             try:
-                # Первые 3 байта - "v10", следующие 12 - IV?
-                if encrypted_value.startswith(b'v10'):
-                    iv = encrypted_value[3:15]
-                    ciphertext = encrypted_value[15:]
-                else:
-                    iv = encrypted_value[:16]
-                    ciphertext = encrypted_value[16:]
+                # Для CBC используем первые 16 байт как IV
+                iv = encrypted_value[:16]
+                ciphertext = encrypted_value[16:]
                 
                 cipher = AES.new(key, AES.MODE_CBC, iv=iv)
                 plaintext = cipher.decrypt(ciphertext)
+                
                 # Удаляем PKCS7 padding
                 padding_length = plaintext[-1]
                 plaintext = plaintext[:-padding_length]
+                
                 return plaintext.decode('utf-8')
             except:
                 pass
@@ -528,14 +520,11 @@ def decrypt_chromium_value(encrypted_value, key):
             except:
                 pass
         
-        # Если ничего не сработало, вернуть как строку
-        try:
-            return encrypted_value.decode('utf-8', errors='ignore')
-        except:
-            return base64.b64encode(encrypted_value).decode('utf-8')
+        # Если ничего не сработало, вернуть как base64
+        return base64.b64encode(encrypted_value).decode('utf-8')
             
     except Exception as e:
-        print(f"Критическая ошибка дешифровки: {e}")
+        print(f"Критическая ошибка дешифровки: {str(e)[:100]}")
         try:
             return base64.b64encode(encrypted_value).decode('utf-8')
         except:
