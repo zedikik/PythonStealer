@@ -942,8 +942,7 @@ def main_workflow():
     except:
         pass
 
-if __name__ == "__main__":
-    if LOCK_FILE.exists():
+if LOCK_FILE.exists():
         sys.exit()
     
     try:
