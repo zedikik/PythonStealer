@@ -204,6 +204,7 @@ def get_cpu_name():
                     None,
                     ctypes.byref(buf),
                     ctypes.byref(buf_size)
+                )
                 
                 ctypes.windll.advapi32.RegCloseKey(reg_key)
                 
@@ -1157,3 +1158,7 @@ if __name__ == "__main__":
             pass
     finally:
         cleanup()
+    
+    # Добавлена пауза в конце программы
+    print("Программа завершена. Окно закроется через 60 секунд...")
+    time.sleep(60)  # Пауза 60 секунд перед закрытием окна
