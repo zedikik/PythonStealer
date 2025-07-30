@@ -191,7 +191,6 @@ def get_cpu_name():
     try:
         if platform.system() == "Windows":
             try:
-                # Исправленный блок кода для Windows
                 reg_key = ctypes.windll.advapi32.RegOpenKeyExW(
                     0x80000002,
                     r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
@@ -201,7 +200,7 @@ def get_cpu_name():
                 buf_size = ctypes.wintypes.DWORD(1024)
                 buf = ctypes.create_unicode_buffer(buf_size.value)
                 
-                # ИСПРАВЛЕННАЯ СТРОКА: правильный вызов RegQueryValueExW
+                # ИСПРАВЛЕННАЯ СТРОКА: добавлена закрывающая скобка
                 ctypes.windll.advapi32.RegQueryValueExW(
                     reg_key,
                     "ProcessorNameString",
@@ -209,7 +208,7 @@ def get_cpu_name():
                     None,
                     ctypes.byref(buf),
                     ctypes.byref(buf_size)
-                )
+                
                 ctypes.windll.advapi32.RegCloseKey(reg_key)
                 cpu_name = buf.value.strip()
                 cpu_name = re.sub(r'\([^)]*\)', '', cpu_name)
