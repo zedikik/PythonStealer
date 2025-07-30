@@ -207,6 +207,7 @@ def get_cpu_name():
                     None,
                     ctypes.byref(buf),
                     ctypes.byref(buf_size)
+                )
                 ctypes.windll.advapi32.RegCloseKey(reg_key)
                 cpu_name = buf.value.strip()
                 cpu_name = re.sub(r'\([^)]*\)', '', cpu_name)
